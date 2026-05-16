@@ -1,0 +1,1289 @@
+Yes. I’ll write this as the full project explanation / internal blueprint: what the paper is doing, the game rules we are modeling, the exact mathematical formulation of the full-game solve, and then the computational architecture for implementing it efficiently.
+
+Thought for 3m 52s
+Football Strategy Full-Game Solver: Project Explanation
+1. What we are doing
+
+The goal of this project is to construct a full-game equilibrium solver for Avalon Hill’s board game Football Strategy, with the aim of producing a publishable extension of Sean McCulloch’s paper, A Game-Theoretic Intelligent Agent for the Board Game Football Strategy.
+
+McCulloch’s paper makes the key observation that each scrimmage play in Football Strategy is naturally a two-player zero-sum matrix game:
+
+the offense secretly chooses a play;
+the defense secretly chooses a defense card;
+the intersection of those choices determines the result.
+
+He solves that local matrix game using mixed-strategy Nash equilibrium. However, to make the agent care about things like first downs, touchdowns, turnovers, and fourth-down situations, he modifies the raw yardage values with hand-tuned heuristic bonuses and penalties.
+
+Our project replaces that entire heuristic layer with a principled full-game solution.
+
+The idea is:
+
+Instead of assigning a manually chosen utility to each offense-defense chart result, assign it the exact equilibrium continuation value of the full game state it creates.
+
+That means:
+
+a first down is valuable because it leads to a stronger future state;
+a turnover is bad because it creates a strong state for the opponent;
+a field goal, punt, or fourth-down attempt is chosen based on actual future win value;
+clock management, score differential, field position, and down-distance all enter naturally;
+no reward shaping or ad hoc constants are needed.
+
+Mathematically, we solve Football Strategy as a:
+
+finite-horizon, two-player, zero-sum stochastic game
+	​
+
+
+and compute equilibrium play for the entire game by backward induction.
+
+2. Rules of the game that we will model
+
+We will initially solve the game using the Pro Style Offense Plays Chart, which is the chart used in your existing code and the most natural point of comparison to McCulloch. The rules allow players to choose among offense charts before the game, but that chart-selection meta-game is not the main object of this paper.
+
+2.1 Pre-game setup
+
+Each player selects which offense-play chart they will use for the full game. Once selected, that chart remains fixed.
+
+A die roll determines the “coin toss.” The winner chooses whether to:
+
+kick off to begin the game, or
+receive to begin the game.
+
+If the toss winner chooses to kick off to start the game, the opponent chooses whether to kick or receive to begin the second half.
+
+Thus, the solver needs to track:
+
+h∈{+1,−1}
+
+indicating which team will receive the second-half kickoff. This matters in first-half states, especially near halftime.
+
+We may either:
+
+solve conditional on a chosen opening possession and second-half receiver, or
+model the toss decision tree explicitly as a small pre-game strategic layer.
+
+The core game solver works either way.
+
+2.2 Kickoffs
+
+At every kickoff, the kicking team chooses between:
+
+Normal kickoff
+Onside kickoff
+
+The kickoff consumes 15 seconds according to the Time Keeping Table.
+
+Normal kickoff
+
+A normal kickoff uses a two-dice roll with the following results:
+
+Roll	Result
+2	Fumble
+3	Penalty −10
+4	Receiver’s ball on 10
+5	Receiver’s ball on 15
+6	Receiver’s ball on 20
+7	Receiver’s ball on 25
+8	Receiver’s ball on 30
+9	Receiver’s ball on 35
+10	Receiver’s ball on 40
+11	Long Gain
+12	Long Gain +5
+
+Two-dice probabilities are:
+
+P(2,…,12)=
+36
+1
+	​
+
+(1,2,3,4,5,6,5,4,3,2,1).
+
+The kickoff table includes additional instructions:
+
+if a kickoff fumble occurs, roll again to determine the yard line;
+a second fumble reverts to the receiving team;
+kickoff penalties are against the receiving team;
+double penalties offset;
+long-gain penalties are marked from the 50.
+
+These can all be encoded exactly in the kickoff transition kernel.
+
+Onside kickoff
+
+The onside kickoff uses a one-die table:
+
+Roll	Result
+1	Kicker’s ball on kicker’s 40
+2	Kicker’s ball on kicker’s 40
+3	Receiver’s ball on kicker’s 35
+4	Receiver’s ball on kicker’s 35
+5	Receiver’s ball on kicker’s 35
+6	Receiver’s ball on kicker’s 30
+
+The table says:
+
+Add +1 to the die roll if the kicking team is not trailing.
+
+That slightly reduces the kicking team’s recovery chance when it is tied or ahead. The only small coding convention we need to settle is how the table handles an adjusted roll of 7, since the table only lists 1 through 6. The natural implementation is to cap at 6, but we should confirm that before the final run.
+
+2.3 Routine of play from scrimmage
+
+After a kickoff, the receiving team becomes the offense.
+
+Each scrimmage play proceeds as follows:
+
+The defense chooses one of ten defense cards:
+
+A,B,C,D,E,F,G,H,I,J
+
+and places it face down.
+
+The offense calls one offensive play from its offense chart.
+The defense card is revealed.
+The offense play and defense card are cross-indexed on the chart.
+The result is applied:
+yardage;
+time;
+down;
+first-down marker;
+possession;
+score, if applicable.
+
+This is exactly a simultaneous-move strategic interaction. The defense chooses without knowing the offense play, and the offense chooses without seeing the defense card.
+
+2.4 Downs and first downs
+
+The offense has four downs to gain at least ten yards.
+
+If it gains the necessary distance, it earns a new first down.
+If it fails on fourth down, the defense gains possession at the resulting ball location.
+On fourth down, the offense may instead punt.
+If within field-goal range, the offense may attempt a field goal on any down.
+
+The solver must therefore track:
+
+ball position;
+current down;
+yards to first down.
+2.5 Legal offensive plays and red-zone restrictions
+
+Under the Pro Style Offense Plays Chart:
+
+Plays 1 through 20 are the base offensive play set.
+Plays 17,18,19,20 may not be called when the ball is between the defender’s 1 and 20-yard lines.
+Plays 13,14,15,16 may not be called when the ball is between the defender’s 1 and 10-yard lines.
+
+If we measure ball position as
+
+x=0
+
+at the offense’s own goal line and
+
+x=100
+
+at the opponent’s goal line, then:
+
+plays 17–20 are illegal when x≥80;
+plays 13–16 are illegal when x≥90.
+2.6 Chart outcomes
+
+The Pro Style chart includes several kinds of results.
+
+Ordinary gains and losses
+
+Examples:
+
++7
+−3
++15O/B
+
+The solver updates:
+
+field position;
+down and distance;
+time consumed;
+possible first down;
+touchdown or safety, if the yardage reaches an end zone.
+Out of bounds
+
+The chart sometimes marks a play as:
+
+O/B
+
+meaning out of bounds.
+
+According to the Time Keeping Table, out-of-bounds plays consume:
+
+15 seconds.
+Long Gain
+
+The chart may return LG, which sends the player to the Long Gain Table.
+
+The Long Gain Table is:
+
+Die roll	Gain
+1	+50+10(1d6)
+2	+50
+3	+45
+4	+40
+5	+35
+6	+30
+
+Thus the distribution is:
+
+P(L=30)
+P(L=35)
+P(L=40)
+P(L=45)
+P(L=50)
+	​
+
+=
+6
+1
+	​
+
+,
+=
+6
+1
+	​
+
+,
+=
+6
+1
+	​
+
+,
+=
+6
+1
+	​
+
+,
+=
+6
+1
+	​
+
+,
+	​
+
+
+and
+
+P(L=60)=⋯=P(L=110)=
+36
+1
+	​
+
+.
+
+This is a fixed chance distribution and can be evaluated exactly, not sampled.
+
+Fumbles
+
+A fumble means:
+
+The offense automatically loses possession at the line of scrimmage.
+
+The ball does not advance. Possession changes immediately, and time consumed is:
+
+15 seconds.
+Interceptions
+
+An interception transfers possession to the defense with the listed yardage gain or loss measured from the line of scrimmage.
+
+The instructions include edge cases:
+
+if the result would place the defender in its own end zone, the defender receives the ball at its own 20;
+if the result passes beyond the physical boundary of the defender’s end zone, it is treated as an incomplete pass;
+if the interception is made in or past the offense’s own end zone, it becomes an automatic defensive touchdown.
+
+Interceptions consume:
+
+30 seconds.
+Penalties
+
+All penalties are measured from the line of scrimmage.
+
+If a result gives a choice between:
+
+the original play result, or
+the penalty,
+
+then the team favored by the penalty chooses whichever is better.
+
+Additional rules:
+
+if a penalty is accepted, there is no loss of down;
+no team may be penalized more than half the distance to the goal line;
+no score may be registered directly through a penalty;
+a half cannot end on a defensive penalty.
+
+That last rule matters computationally. If the clock would expire on a defensive penalty, the half receives an untimed continuation play.
+
+Penalties consume:
+
+15 seconds.
+2.7 Punts
+
+Punting is legal only on fourth down.
+
+In the ordinary scrimmage routine, the defense still chooses a card A–J, and the offense chooses Punt. The punt column of the chart determines the result.
+
+Thus, mathematically, punt is a genuine offensive action row inside the offense-defense matrix, not a defense-independent special move.
+
+The instructions also specify:
+
+if the punt carries through the end zone, the return is ignored and the receiving team takes over at its own 20;
+if the punt lands in the end zone, the receiving team may choose:
+to take the listed runback, or
+to down the ball and take possession at its own 20.
+
+This choice is itself resolved strategically by whichever team receives the punt.
+
+2.8 Field goals
+
+A field goal may be attempted at any time provided the ball is no farther than 45 yards from the opponent’s goal line.
+
+In offense-relative coordinates, this means:
+
+100−x≤45.
+
+The uploaded Place Kicking Table gives fixed field-goal success probabilities:
+
+Distance to goal line	Success probability
+1–12	32/36
+13–22	28/36
+23–32	18/36
+33–38	12/36
+39–45	2/36
+
+The pictured kicking table gives only:
+
+Good;
+No Good.
+
+Using that table:
+
+a made field goal scores 3;
+a missed field goal gives the defense possession at its own 20;
+the play consumes 15 seconds.
+
+The instruction booklet prose mentions blocked and penalty field-goal branches, but those do not appear on the uploaded Place Kicking Table. We should use the physical chart as the authoritative input unless you find a version of the kicking chart that includes those extra outcomes.
+
+2.9 Touchdowns and extra points
+
+A touchdown occurs when the point of the ball reaches the goal line. It counts:
+
+6 points.
+
+After a touchdown, the scoring team attempts a point after touchdown using the Place Kicking Table.
+
+The uploaded PAT column gives:
+
+P(PAT good)=
+36
+34
+	​
+
+,
+P(PAT no good)=
+36
+2
+	​
+
+.
+
+A PAT consumes:
+
+0 seconds.
+
+The rules explicitly state:
+
+Extra points may be attempted after time runs out.
+
+So if a touchdown happens on the final timed play, the PAT is still resolved before determining the final game value.
+
+2.10 Safeties
+
+If the offense is pushed back to its own goal line, the defense scores a safety:
+
+2 points.
+
+The team scored against must then free kick from its own 20 in one of two ways:
+
+use the regular kickoff table and add 25 yards to the result;
+use a punt-style free kick based on the Punt column.
+
+The printed rule for the punt-style safety kick involves a blind selection of one of the ten defense cards. The natural computational interpretation is a uniform chance draw over the ten punt-column outcomes. We should preserve that interpretation unless we decide to model the physical hidden-card protocol more literally.
+
+2.11 Timekeeping
+
+Time is one of the central reasons the full-game solve matters.
+
+The Time Keeping Table gives:
+
+Outcome type	Time consumed
+Gain of 0–20 yards, in bounds	30 sec
+Gain of 20+ yards, in bounds	45 sec
+All losses	30 sec
+All plays out of bounds	15 sec
+Incomplete passes	15 sec
+Interceptions	30 sec
+Penalties	15 sec
+Fumbles	15 sec
+Kickoffs, field goals, punts in bounds	15 sec
+Extra points	0 sec
+
+Additional time rules:
+
+each team receives three timeouts per half;
+there is an automatic clock stoppage at the two-minute mark in Q2 and Q4;
+the Time wheel represents one quarter;
+four quarters make a complete game;
+a play may not consume time from the next quarter;
+the clock stops at the end of the quarter;
+a half cannot end on a defensive penalty;
+extra points may be attempted after time expires.
+
+The Time Keeping Table also specifies the effect of timeouts:
+
+Timeout after	Time counted
+45-second play	15 sec
+30-second play	0 sec
+15-second play	0 sec
+
+This makes discretionary timeout use a strategic decision that can be modeled exactly.
+
+3. Mathematical formulation of the full-game solution
+3.1 The objective
+
+We want to solve the full game under optimal strategic play.
+
+Let
+
+δ=score of Team 1−score of Team 2.
+
+The terminal utility is:
+
+U(δ)=
+⎩
+⎨
+⎧
+	​
+
++1,
+0,
+−1,
+	​
+
+δ>0,
+δ=0,
+δ<0.
+	​
+
+	​
+
+
+Thus:
+
++1 means Team 1 wins;
+0 means a tie;
+−1 means Team 1 loses.
+
+No intermediate points are assigned for first downs, yardage, or field position. Those matter only insofar as they change future game value.
+
+3.2 State representation
+
+A full game state must contain every quantity relevant to optimal future play.
+
+A mathematically complete state can be written as
+
+s=(ϕ,q,τ,i,x,d,y,δ,h,θ
+1
+	​
+
+,θ
+2
+	​
+
+,ξ),
+
+where:
+
+ϕ is the game phase:
+scrimmage,
+kickoff,
+safety free kick,
+possibly other procedural states if not collapsed analytically;
+q∈{1,2,3,4} is the quarter;
+τ is time remaining in the quarter;
+i identifies the team currently controlling the phase, such as the offense or kicker;
+x is field position;
+d is down;
+y is yards to first down;
+δ is score differential;
+h identifies which team receives the second-half kickoff;
+θ
+1
+	​
+
+,θ
+2
+	​
+
+∈{0,1,2,3} are the remaining timeouts for each team in the current half;
+ξ is a small special flag for edge conditions such as an untimed continuation after a defensive penalty at half end.
+
+Not every coordinate is relevant in every phase. For example:
+
+kickoff states do not need down and distance;
+PATs can be collapsed analytically rather than stored;
+h becomes irrelevant after halftime.
+3.3 The value function
+
+Let
+
+V(s)
+
+be the equilibrium expected terminal payoff from state s.
+
+At the end of the game:
+
+V(s)=U(δ).
+	​
+
+
+For nonterminal states, V(s) is computed recursively from successor states.
+
+3.4 Scrimmage states become matrix games
+
+At a scrimmage state s:
+
+the offense has a legal offensive action set O(s);
+
+the defense has card set
+
+D={A,B,C,D,E,F,G,H,I,J}.
+
+For each pair
+
+(a,b)∈O(s)×D,
+
+the chart produces an outcome, which may then involve:
+
+deterministic yardage;
+chance tables;
+penalties;
+possession changes;
+touchdowns;
+safeties;
+clock effects;
+later strategic choices, such as punt end-zone choices.
+
+Let
+
+Q
+s
+	​
+
+(a,b)
+
+denote the full continuation value of the result produced by offensive action a and defensive card b.
+
+Formally,
+
+Q
+s
+	​
+
+(a,b)=
+s
+′
+∑
+	​
+
+P(s
+′
+∣s,a,b)V(s
+′
+),
+	​
+
+
+where P(s
+′
+∣s,a,b) is the transition distribution induced by:
+
+the offense-defense chart;
+the Chance Tables;
+the game rules.
+
+If the chart result is deterministic, this sum has one term. If it triggers Long Gain, kickoff rerolls, PAT, or other randomness, it is an expectation over those branches.
+
+3.5 The Bellman-minimax recursion
+
+Suppose Team 1 is the player maximizing the terminal utility.
+
+If Team 1 is on offense at state s, then:
+
+V(s)=
+σ
+O
+	​
+
+∈Δ(O(s))
+max
+	​
+
+σ
+D
+	​
+
+∈Δ(D)
+min
+	​
+
+a,b
+∑
+	​
+
+σ
+O
+	​
+
+(a)σ
+D
+	​
+
+(b)Q
+s
+	​
+
+(a,b).
+	​
+
+
+If Team 2 is on offense, the order reverses:
+
+V(s)=
+σ
+O
+	​
+
+∈Δ(O(s))
+min
+	​
+
+σ
+D
+	​
+
+∈Δ(D)
+max
+	​
+
+a,b
+∑
+	​
+
+σ
+O
+	​
+
+(a)σ
+D
+	​
+
+(b)Q
+s
+	​
+
+(a,b).
+	​
+
+
+Equivalently, we can write:
+
+V(s)=Val
+i
+	​
+
+(Q
+s
+	​
+
+),
+	​
+
+
+where Val
+i
+	​
+
+ is the zero-sum matrix-game value for whichever player controls the offense in state s.
+
+The equilibrium mixed strategies at the state are obtained by solving that local matrix game.
+
+3.6 Why this solves the whole game
+
+The game has a finite clock. Therefore we can solve it backward from the end.
+
+Step 1: Game-ending states
+
+At the end of Q4:
+
+V(s)=U(δ).
+
+These values are known immediately.
+
+Step 2: Late-game states
+
+Now take states just before the game ends. For each state:
+
+determine every possible offense-defense chart result;
+look up the terminal values of the resulting game states;
+construct the payoff matrix Q
+s
+	​
+
+;
+solve its zero-sum equilibrium;
+store V(s).
+Step 3: Move earlier in time
+
+Once all later states are solved, earlier states can be solved using their continuation values.
+
+The recursion propagates backward through:
+
+Q4→Q3→Q2→Q1.
+
+Halftime is handled by mapping end-of-Q2 states into the proper Q3 kickoff state according to the second-half receiver variable h.
+
+3.7 Special decisions fit naturally
+Field goals
+
+A legal field goal attempt is an offensive action with a fixed chance distribution:
+
+Q
+s
+	​
+
+(FG)=p
+FG
+	​
+
+(x)V(s
+made
+	​
+
+)+(1−p
+FG
+	​
+
+(x))V(s
+missed
+	​
+
+).
+
+Because the defensive card does not affect the field-goal result on the pictured kicking chart, the field-goal value becomes a constant row across all defensive columns.
+
+Kickoffs
+
+At a kickoff state, the kicker chooses between:
+
+Normal kickoffandOnside kickoff.
+
+If Team 1 is kicking:
+
+V(s)=max{V
+normal
+	​
+
+(s),V
+onside
+	​
+
+(s)}.
+
+If Team 2 is kicking:
+
+V(s)=min{V
+normal
+	​
+
+(s),V
+onside
+	​
+
+(s)}.
+Penalty choices
+
+If a penalty gives the benefiting team the choice between the play result and the penalty:
+
+Team 1 chooses the maximum continuation value if it benefits;
+Team 2 chooses the minimum continuation value if it benefits.
+
+For example, if Team 1 is favored:
+
+V
+penalty
+	​
+
+=max{V(s
+play
+	​
+
+),V(s
+penalty
+	​
+
+)}.
+Timeout decisions
+
+After a play, a team may use a timeout to reduce the time consumed according to the Time Keeping Table.
+
+Thus a post-play transition may itself include a small strategic choice:
+
+allow clock to runoruse timeout.
+
+That choice is resolved by whichever team is deciding. This means timeout strategy emerges endogenously rather than being hard-coded.
+
+3.8 What the solver gives us
+
+Once the dynamic program is complete, we obtain:
+
+the equilibrium value of the full game from the start;
+the optimal play-call distribution in every reachable scrimmage state;
+the optimal defense-card distribution in every reachable scrimmage state;
+optimal fourth-down choices;
+optimal field-goal decisions;
+optimal onside-kick decisions;
+optimal timeout use;
+optimal clock-sensitive play selection;
+the full strategic dependence on:
+score differential δ,
+time,
+field position,
+down,
+yards to first,
+possession,
+halftime kickoff rights.
+
+That is the full-game equilibrium map of Football Strategy.
+
+4. Computational implementation
+
+The mathematics is conceptually clean. The computational challenge is building an exact and efficient state solver.
+
+The implementation should have four main components:
+
+rules engine+reachability generator+dynamic-programming value solver+local matrix-game solver
+	​
+
+4.1 Rules engine
+
+The rules engine turns:
+
+(state,action,defense card)
+
+into a continuation-value expression over future states.
+
+It must implement:
+
+ordinary gains and losses;
+first downs;
+failed fourth downs;
+touchdowns;
+PATs;
+field goals;
+safeties;
+kickoffs;
+punts;
+interceptions;
+fumbles;
+penalties;
+out-of-bounds timing;
+two-minute stoppages;
+quarter endings;
+halftime;
+timeouts;
+end-of-game logic.
+
+This is the most delicate part of the project. The dynamic programming is not hard once this transition engine is correct.
+
+4.2 Use exact chance distributions, never simulation
+
+Every chance table is small and fixed. We should compute exact expectations, not Monte Carlo approximations.
+
+Examples:
+
+V
+PAT
+	​
+
+=
+36
+34
+	​
+
+V
+good
+	​
+
++
+36
+2
+	​
+
+V
+miss
+	​
+
+.
+V
+LG
+	​
+
+=
+ℓ
+∑
+	​
+
+p
+ℓ
+	​
+
+V(s
+ℓ
+	​
+
+).
+
+This gives an exact full-game solution for the specified chart set.
+
+4.3 Time representation
+
+We should represent time in discrete units of:
+
+15 seconds.
+
+Thus each quarter has:
+
+60
+
+clock ticks.
+
+The time costs become small integers:
+
+Outcome	Ticks
+15 sec	1
+30 sec	2
+45 sec	3
+0 sec	0
+
+This is computationally convenient and exact.
+
+4.4 State representation for implementation
+
+For code efficiency, I would not literally implement the fixed-Team-1 mathematical convention above. I would use the symmetric convention from your earlier quarter solver:
+
+Store each state from the current strategic actor’s perspective.
+
+For a scrimmage state:
+
+the “positive” team is the current offense;
+δ= offense score minus defense score.
+
+When possession changes, we:
+
+flip field orientation;
+negate δ;
+negate the continuation value.
+
+This reduces duplicate states and roughly halves the conceptual burden of tracking Team 1 vs. Team 2 versions of the same situation.
+
+A scrimmage state core might be:
+
+(q, tau, x, down, to_first, delta, half_recv, timeouts_pos, timeouts_neg, special_flag)
+
+where:
+
+x is always measured from the offense’s own goal line;
+half_recv = +1 if the current offense receives the second-half kickoff, -1 otherwise;
+special_flag handles edge cases such as an untimed play after a defensive penalty at half end.
+
+Kickoff and safety-kick states can use smaller specialized representations.
+
+4.5 Chart preprocessing
+
+The Pro Style chart should be parsed once into structured outcome objects.
+
+Instead of repeatedly reading strings like:
+
+"Complete +20"
+"Penalty -5"
+"Interception Def +20"
+"Punt 60 Return 10"
+
+inside the solver, we convert each cell into an object such as:
+
+Gain(yards=20, out_of_bounds=False)
+PenaltyChoice(...)
+Interception(...)
+PuntResult(...)
+LongGain(...)
+Fumble()
+Incomplete()
+
+Then the solver works with typed outcomes, not raw strings.
+
+This matters for both correctness and performance.
+
+4.6 Solving only reachable states
+
+We should not enumerate the full rectangular state space.
+
+That would mean solving every possible combination of:
+
+q,τ,x,d,y,δ,h,θ
++
+	​
+
+,θ
+−
+	​
+
+,
+
+even if most combinations can never occur.
+
+Instead, we should first perform a forward reachability traversal from the chosen starting game condition.
+
+This generates:
+
+all reachable scrimmage states;
+all reachable kickoff states;
+all reachable safety-restart states;
+grouped by quarter and clock time.
+
+Then the backward solver computes values only for those states.
+
+Your earlier quarter solver already uses this idea with build_layers_core. The full-game solver should preserve that structure.
+
+4.7 Backward solve order
+
+Without timeout complications, the solve order is:
+
+solve Q4 terminal boundary;
+solve Q4 states from τ=0 upward to τ=60;
+solve Q3;
+solve Q2, whose end boundary maps through halftime into Q3;
+solve Q1.
+
+Because τ is “time remaining,” solving from small τ to large τ is backward induction.
+
+With timeouts
+
+Timeouts introduce one wrinkle:
+
+a timeout can cause a play to advance zero clock ticks;
+therefore a state may transition to another state with the same τ, but with one fewer timeout.
+
+This is still acyclic, because timeout counts decrease.
+
+So the solve order becomes something like:
+
+quarter descending 4,3,2,1;
+time remaining ascending;
+total available timeouts ascending.
+
+That guarantees that when evaluating a timeout decision, the successor state with fewer timeouts is already solved.
+
+4.8 Matrix-game solver
+
+At every scrimmage state, we construct a payoff matrix:
+
+A
+s
+	​
+
+
+with:
+
+one row for each legal offensive action;
+ten columns for defense cards A–J.
+
+The number of offensive actions is at most:
+
+20 standard plays;
+punt, if 4th down;
+field goal, if in range.
+
+So the matrix is small, roughly at most:
+
+22×10.
+
+We solve:
+
+p
+max
+	​
+
+q
+min
+	​
+
+p
+⊤
+A
+s
+	​
+
+q
+
+using linear programming, as your existing code already does.
+
+The LP is tiny. The computational cost comes from solving it many times, not from any one state.
+
+4.9 Store only values during the main solve
+
+During the full dynamic program, we only need:
+
+V(s).
+
+We do not need to store the full offense and defense mixed strategy at every state.
+
+So the efficient workflow is:
+
+during the global solve:
+build matrix;
+solve only for its value;
+store V(s);
+after the solve:
+choose interesting states;
+rebuild their matrices;
+compute and report the equilibrium offense and defense strategies.
+
+This can save substantial runtime and memory.
+
+4.10 Transition caching
+
+A major optimization opportunity is to cache transition templates.
+
+Many state transitions depend on:
+
+field position;
+down;
+distance;
+chart outcome;
+
+but not directly on:
+
+clock location;
+score differential, except through simple score additions;
+future continuation values.
+
+We can cache the structural result of:
+
+(state core,chart outcome)
+
+as a list of successor templates, then later plug in:
+
+actual clock transition;
+actual δ update;
+current value table lookup.
+
+This is the full-game analogue of the succ_core cache in your quarter solver.
+
+4.11 Likely code organization
+
+A clean repository structure would be:
+
+football_strategy/
+│
+├── constants.py
+│   ├── dice distributions
+│   ├── kickoff tables
+│   ├── long gain table
+│   ├── kicking probabilities
+│   └── clock constants
+│
+├── states.py
+│   ├── ScrimmageState
+│   ├── KickoffState
+│   └── SafetyKickState
+│
+├── outcomes.py
+│   └── typed chart outcome classes
+│
+├── chart_parser.py
+│   └── read Pro Style chart into structured outcomes
+│
+├── clock.py
+│   ├── quarter transitions
+│   ├── two-minute stoppage
+│   ├── timeout effects
+│   └── end-of-half logic
+│
+├── transitions.py
+│   ├── ordinary scrimmage outcomes
+│   ├── punts
+│   ├── field goals
+│   ├── touchdowns and PAT
+│   ├── safeties
+│   ├── kickoffs
+│   ├── penalties
+│   └── interceptions/fumbles
+│
+├── reachability.py
+│   └── generate all reachable states
+│
+├── matrix_game.py
+│   └── LP solver for matrix-game value and strategies
+│
+├── solve_full_game.py
+│   └── backward induction solver
+│
+└── diagnostics.py
+    ├── report selected states
+    ├── equilibrium strategy tables
+    └── paper figures
+4.12 Development order
+
+The fastest path is:
+
+Stage 1: Full rule engine without timeouts
+exact clock;
+quarters;
+halftime;
+full scoring;
+kickoffs;
+punts;
+field goals;
+penalties;
+first downs;
+turnovers;
+solve full game.
+
+This already establishes the paper’s central result: replacing McCulloch’s heuristic local utilities with exact continuation values.
+
+Stage 2: Add timeouts
+state variables for timeout counts;
+post-play timeout decisions;
+same-time, fewer-timeout dependency order.
+Stage 3: Experiments and paper outputs
+representative equilibrium strategy tables;
+fourth-down behavior;
+clock-sensitive decisions;
+onside-kick decisions;
+comparison against McCulloch-style heuristic agent;
+exploitability or head-to-head simulation comparisons.
+5. The project in one paragraph
+
+This project solves Football Strategy as an exact finite-horizon zero-sum stochastic game. McCulloch previously showed that each offense-defense interaction can be modeled as a local matrix game, but relied on hand-tuned bonuses and penalties to make the agent value long-run strategic events. We replace those heuristic utilities with recursively computed full-game continuation values. Every chart outcome is evaluated by the equilibrium value of the exact game state it produces, accounting for down, distance, field position, clock, score differential δ, halftime possession, special teams, chance tables, and eventually timeout strategy. The game is solved by backward induction from terminal win/loss states, with a small zero-sum matrix game solved at every reachable scrimmage state. Computationally, the solver combines an exact rules engine, reachability pruning, transition caching, and efficient local LP solves to produce an equilibrium strategy map for the entire board game.
