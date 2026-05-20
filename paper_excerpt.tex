@@ -481,9 +481,11 @@ Original play duration & Ticks without TO & Ticks after TO \\
 \end{tabular}
 \end{table}
 
-\noindent Calling a timeout is therefore strategically useful only after a 3-tick (long
-gain, $\geq 20$ yards) or 2-tick (normal in-bounds gain) play, where it saves 2 or 1 tick
-respectively.
+\noindent A timeout can save clock ticks after any play type.  The most critical case
+is a 1-tick play (out-of-bounds, incomplete, or penalty) when the clock is about to
+expire: calling a timeout reduces the charge to 0 ticks, preserving the remaining
+time entirely and allowing one more snap.  After a 2-tick play the savings are even
+larger (2 ticks saved), and after a 3-tick long gain the charge drops from 3 to 1 tick.
 
 \subsection{The Post-Play Timeout Sub-Game}
 
