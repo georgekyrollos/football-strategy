@@ -268,67 +268,96 @@ PATs consume zero clock time.
 \label{sec:algorithm}
 %────────────────────────────────────────────────────────────────────────────────
 
-\subsection{The Bellman--Minimax Recursion}
+\subsection{The Core Idea}
 
-Let $V(s)$ denote the equilibrium value of state $s$ from the perspective of the current
-offense (Team~1 when Team~1 has the ball, Team~2's negative when Team~2 has the ball).
-The terminal condition is $V(q=4,\tau=0,\cdot) = U(\delta)$.
+The fundamental observation is that \emph{Football Strategy} is finite: the clock
+always ticks forward, so the game must end.  This means we can work backwards from
+the final whistle.  At the last possible moment (clock at zero), the outcome is just
+win, loss, or draw --- the terminal utility $U(\delta) = \operatorname{sgn}(\delta)$.
+One tick earlier, each team chooses optimally given that they know exactly what will
+happen at clock zero.  One tick before that, they choose knowing what will happen one
+tick from now.  Repeat all the way back to kickoff.  This is backward induction, and
+it gives the exact equilibrium of the game.
 
-For each scrimmage state $s$, let $O(s) \subseteq \{1,\ldots,20\} \cup \{\textsc{punt},
-\textsc{fg}\}$ be the set of legal offensive actions and $D = \{A,\ldots,J\}$ the set of
-defensive cards.  Define the expected continuation value of the action pair $(a,b)$:
+\subsection{Solving Each Game State}
+
+At each scrimmage state $s$, both teams choose simultaneously and without seeing each
+other's decision --- the offense picks a play number, the defense picks a card, and the
+result is read from the chart.  This is exactly a finite two-player zero-sum matrix game.
+The payoff matrix $A^{(s)}$ has one row per legal offensive action and ten columns (one
+per defense card~A--J), with entry
 \[
-  Q_s(a,b) = \sum_{s'} P(s'\mid s,a,b)\, V(s'),
+  A^{(s)}_{a,b} = \sum_{s'} P(s'\mid s,a,b)\, V(s'),
 \]
-where the sum is over successor states.  The equilibrium value satisfies
+the expected game value of the position that results from the play.  Since we solve
+from low clock to high clock, $V(s')$ is always already known.
+
+The equilibrium value of state $s$ is the solution to the minimax problem:
 \begin{equation}
   \label{eq:minimax}
-  V(s) = \max_{\sigma_O \in \Delta(O(s))}\; \min_{\sigma_D \in \Delta(D)}\;
-  \sum_{a \in O(s)}\sum_{b \in D} \sigma_O(a)\,\sigma_D(b)\, Q_s(a,b).
+  V(s) = \max_{\sigma_O}\; \min_{\sigma_D}\;
+  \sigma_O^\top A^{(s)} \sigma_D.
 \end{equation}
-By the minimax theorem, the max and min can be exchanged, and the common value equals
-$V(s)$.
+By the minimax theorem, there is always a well-defined value and optimal (possibly
+mixed) strategies for both sides.
 
-\subsection{Linear Programming Formulation}
+\subsection{Finding the Equilibrium: Saddle Points and Linear Programming}
 
-For each scrimmage state $s$, we assemble the payoff matrix
-$A^{(s)} \in \mathbb{R}^{|O(s)|\times 10}$
-with $A^{(s)}_{a,b} = Q_s(a,b)$ and solve the row player's (offense's) LP:
+For many game states there is a single dominant offensive play --- one that is at
+least as good as every other play regardless of what the defense calls.  We call this
+a \emph{saddle point}: the maximum of the row-minimum values equals the minimum of
+the column-maximum values,
+\[
+  \max_a \min_b A_{a,b} = \min_b \max_a A_{a,b}.
+\]
+When this holds, the optimal strategy is pure (no randomisation needed), and we read
+the answer directly off the matrix in $O(|O|\cdot|D|)$ time without any LP call.
+This is not an approximation --- it is the exact Nash equilibrium, guaranteed by the
+saddle-point theorem.  In practice this shortcut fires on roughly 40--60\% of game
+states, substantially reducing total solve time.
+
+When no saddle point exists, the equilibrium is a mixed strategy found by solving the
+row player's (offense's) LP:
 \begin{align*}
   \text{maximize} \quad & v \\
   \text{subject to} \quad
-  & \sum_{a} p_a\, A^{(s)}_{a,b} \geq v \quad \forall b \in D, \\
-  & \sum_{a} p_a = 1, \quad p_a \geq 0 \quad \forall a \in O(s).
+  & \sum_{a} p_a\, A^{(s)}_{a,b} \geq v \quad \forall b, \\
+  & \textstyle\sum_{a} p_a = 1, \quad p_a \geq 0.
 \end{align*}
-The optimal value $v^* = V(s)$ and the optimal $p^*$ is the equilibrium mixed strategy
-for the offense.  An analogous LP yields the defense's equilibrium mixed strategy.  Both
-LPs are solved using the HiGHS interior-point and dual-simplex solvers via
+The optimal $v^* = V(s)$ and $p^*$ is the offense's equilibrium mixed strategy.
+Both teams' strategies are computed using the HiGHS solver via
 \texttt{scipy.optimize.linprog}.
 
 \subsection{Backward Induction and Forward Reachability}
 
-Because states at clock time $\tau$ depend only on states at $\tau' < \tau$ (the game
-moves forward in real time), solving from $\tau=1$ upward within each quarter, then from
-$Q4$ backward to $Q1$, gives a correct backward-induction order.
+Because the clock only moves forward, all states at time $\tau$ depend only on
+states at $\tau' < \tau$ --- there are no circular dependencies.  This means we can
+solve the whole game in a single sweep: process the states at $\tau=1$ first (only
+one tick of game remaining), then $\tau=2$, all the way up to $\tau=60$.  Within
+each quarter, every state at a given $\tau$ is completely independent of every other
+state at the same $\tau$, so they can be solved in parallel.  After each quarter is
+done, we seed the next quarter from the quarter boundary values and repeat.
 
-Algorithm~\ref{alg:solve} summarizes the procedure.  The forward BFS ensures that only
-reachable states are solved, which reduces the state count substantially.
+Not every state in the theoretical state space is reachable from the opening kickoff.
+Before solving, we run a forward BFS from the start state to enumerate only the states
+that can actually occur under any sequence of plays.  This reduces the number of states
+to solve from hundreds of millions to approximately $30$ million for Q4.
 
 \begin{algorithm}[ht]
 \caption{Full-game backward induction solver}
 \label{alg:solve}
 \begin{algorithmic}[1]
 \Require Offense chart $C$, punt chart $P$, start state $s_0$
-\State $\mathcal{S} \gets \textsc{ForwardBFS}(C, P, s_0)$ \Comment{Enumerate all reachable states}
+\State $\mathcal{S} \gets \textsc{ForwardBFS}(C, P, s_0)$ \Comment{Only reachable states}
 \For{$q \in \{4, 3, 2, 1\}$}
   \State Apply quarter-boundary seeding (e.g.\ halftime kickoff)
   \For{$\tau \in \{1, 2, \ldots, 60\}$}
     \For{each reachable state $s$ at $(q, \tau)$ \textbf{in parallel}}
       \If{$s$ is a scrimmage state}
-        \State Build $A^{(s)}$ by calling transition engine for each $(a,b) \in O(s)\times D$
-        \State $V(s) \gets$ LP value of $A^{(s)}$
+        \State Build $A^{(s)}$; check for saddle point
+        \State $V(s) \gets$ saddle-point value or LP value of $A^{(s)}$
       \ElsIf{$s$ is a kickoff or safety-kick state}
-        \State $V(s) \gets$ closed-form expected value over kickoff/punt table
+        \State $V(s) \gets$ closed-form expected value
       \EndIf
     \EndFor
   \EndFor
@@ -337,27 +366,98 @@ reachable states are solved, which reduces the state count substantially.
 \end{algorithmic}
 \end{algorithm}
 
-Each tau layer is embarrassingly parallel: states at $(q, \tau)$ look up values only at
-already-solved $(q, \tau')$ with $\tau' < \tau$, so there are no write conflicts.  The
-implementation uses Python's \texttt{multiprocessing} with \texttt{fork} semantics so that
-the ${\sim}2.5$~GB value table is inherited copy-on-write by worker processes at zero
-serialization cost.
-
 \subsection{Value Storage}
 
-Storing one float per reachable state na\"{i}vely would require a hash map over ${\sim}30$
-million keys.  Instead, we use dense NumPy arrays shaped to the state-space dimensions:
+Rather than a hash map over 30 million keys, values are stored in dense multi-dimensional
+NumPy arrays indexed directly by state coordinates, giving O(1) lookup:
 \begin{itemize}
   \item Q3/Q4 scrimmage: shape $(2,\, 61,\, 99,\, 4,\, 30,\, 71)$, approximately
         $823$~MB.  No $h$ dimension because $h=0$ in the second half.
   \item Q1/Q2 scrimmage: shape $(2,\, 61,\, 99,\, 4,\, 30,\, 71,\, 2)$, approximately
-        $1.65$~GB.  The last axis is $h \in \{-1,+1\}$.
-  \item Kickoff and safety-kick arrays: shape $(2,\, 61,\, 71)$ or $(2,\, 61,\, 71,\, 2)$,
-        negligible size.
+        $1.65$~GB.
+  \item Kickoff and safety-kick arrays: negligible size.
 \end{itemize}
-Total memory: approximately $2.47$~GB.  Unsolved slots are initialized to \texttt{NaN};
-any read of an unsolved slot raises a \texttt{KeyError}, detecting dependency errors
-immediately.
+Total memory: approximately $2.47$~GB.  Unsolved slots are initialised to \texttt{NaN};
+any read of an unsolved slot raises an error immediately, catching dependency bugs.
+
+%────────────────────────────────────────────────────────────────────────────────
+\section{Computational Implementation}
+\label{sec:implementation}
+%────────────────────────────────────────────────────────────────────────────────
+
+Solving ${\sim}30$ million matrix games is not expensive in principle --- each game is
+tiny (${\leq}22\times10$) --- but doing it 16 times over (once per timeout-count
+combination) requires care.  This section describes the engineering decisions that
+make the solve tractable.
+
+\subsection{Score Differential Clipping}
+
+The score differential $\delta$ (offense minus defense) is theoretically unbounded,
+but a lead of more than 35 points in a single quarter is effectively insurmountable.
+We clip $\delta$ to the range $[-35, 35]$, giving 71 distinct values.  This is not
+just an approximation made for convenience: the terminal utility $U(\delta) = \operatorname{sgn}(\delta)$
+is flat outside $\{-1,0,+1\}$, so states with $|\delta| > 35$ already have a certain
+outcome and their values propagate trivially.  Clipping makes the state space finite
+and dense-array-representable without affecting the equilibrium strategies in any
+reachable game situation.
+
+\subsection{Symmetric Possession Representation}
+
+Rather than tracking both field position from Team~1's perspective \emph{and} which
+team has the ball, we always write the state from the current offense's point of view.
+Field position $x$ is always yards from the \emph{current offense's} own goal.  When
+possession changes, we flip $x \to 100 - x$, $\delta \to -\delta$, $h \to -h$, and
+negate the continuation value.  This halves the state space and means a single value
+table covers both teams --- there is no asymmetry to track.
+
+\subsection{Pure-Strategy Saddle-Point Shortcut}
+
+Before calling the LP solver on a payoff matrix $A$, we check whether a saddle point
+exists.  A saddle point is a position in the matrix that is simultaneously the smallest
+value in its row and the largest value in its column --- in other words, a play the
+offense always wants to run regardless of what the defense calls, and a card the defense
+always wants to call regardless of what the offense runs.
+
+Concretely: if the maximum of the row-minimum values equals the minimum of the
+column-maximum values,
+\[
+  \underbrace{\max_a \min_b A_{a,b}}_{\text{maximin}} = \underbrace{\min_b \max_a A_{a,b}}_{\text{minimax}},
+\]
+then the saddle point is a pure Nash equilibrium and no LP is needed.  The game value
+is exactly the saddle-point entry.  This check costs $O(22 \times 10)$ arithmetic
+operations, compared to the LP which requires hundreds of simplex iterations.  In
+practice it fires on roughly 40--60\% of game states (most clearly in short-yardage
+situations and end-of-game scenarios), roughly halving total solve time.
+
+\subsection{Fork-Based Parallelism}
+
+Two levels of parallelism are exploited.
+
+\paragraph{Within a $\tau$ layer.}
+States at the same $(q, \tau)$ are completely independent --- they read values only
+from already-solved lower-$\tau$ states.  The implementation distributes them across
+CPU cores using Python's \texttt{multiprocessing.Pool} with the \texttt{fork} start
+method.  Forking is critical: it makes the full ${\sim}2.5$~GB value table available to
+every worker at zero serialization cost (the operating system shares pages
+copy-on-write), so workers pay only for the small number of pages they actually
+write.
+
+\paragraph{Across timeout-count combinations.}
+Combinations $(\theta_1, \theta_2)$ with the same total $\theta_1 + \theta_2$ are
+independent of each other --- they read only from already-solved combinations with
+smaller totals.  Rather than solving them sequentially, we fork one process per
+combination at each level and solve them simultaneously.  With 16 workers and 4
+combinations at the most populated level, this gives up to $4\times$ speedup on the
+timeout solve.  Workers are split evenly: if $k$ combinations run in parallel each
+gets $\lfloor n_\text{workers}/k \rfloor$ state-level workers.
+
+\subsection{Runtime and Memory}
+
+The Q4 base solve (no timeouts remaining) runs in approximately 8 hours on a 16-core
+machine.  With the saddle-point shortcut and parallel combo execution the full 16-table
+solve is estimated to take 1--2 days on the same hardware.  Peak RAM usage is
+approximately $3 \times 823\,\text{MB} \approx 2.5\,\text{GB}$ for the active value
+tables at any one time; completed tables are saved to disk and evicted.
 
 %────────────────────────────────────────────────────────────────────────────────
 \section{Timeout Decisions}

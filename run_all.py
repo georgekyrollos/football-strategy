@@ -29,7 +29,7 @@ print("\n=== Base solve: backward induction, no timeouts remaining ===")
 solve_full_game(
     sc, pc, START_KEY,
     verbose=True,
-    n_workers=8,
+    n_workers=16,
     save_path="q4_full_v",
 )
 
@@ -40,5 +40,5 @@ solve_with_timeouts(
     base_path="q4_full_v.npz",
     out_prefix="q4_to_v",
     use_tqdm=True,
-    n_workers=8,  # combos at the same level run in parallel, workers split across them
+    n_workers=16,
 )
