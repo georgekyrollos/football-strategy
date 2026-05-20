@@ -465,7 +465,24 @@ def _apply_interception(
         ))
         return templates
 
-    # Touchback: defender catches in/runs into own end zone (offense perspective: x_after >= 100)
+    # Beyond physical boundary of defender's end zone (plan.txt §2.6):
+    # end zone is 10 yards deep → back of end zone at x_after = 110.
+    # If result exceeds that, it is treated as an incomplete pass.
+    if x_after > 110:
+        if down < 4:
+            return [SuccessorTemplate(
+                1.0, "scrimmage", _sc(x, down + 1, to_first, delta, h),
+                ticks=1, swapped=False, delta_change=0,
+            )]
+        else:
+            recv_x  = 100 - x
+            recv_tf = goal_to_go(recv_x)
+            return [SuccessorTemplate(
+                1.0, "scrimmage", _sc(recv_x, 1, recv_tf, -delta, -h),
+                ticks=1, swapped=True, delta_change=0,
+            )]
+
+    # Touchback: defender catches in own end zone (100 ≤ x_after ≤ 110)
     if x_after >= 100:
         # Ball placed at 20 from receiver's (intercepting team's) own goal
         recv_x  = 20
@@ -633,8 +650,7 @@ def _punt_final_position(final_x: int, delta: int, h: int) -> List[SuccessorTemp
             ),
         ]
 
-    recv_x  = max(1, min(99, final_x))
-    recv_tf = goal_to_go(recv_x)
+    recv_x = max(1, min(99, final_x))
     # Receiving team gets ball: flip to their perspective
     new_x  = max(1, 100 - recv_x)
     new_tf = goal_to_go(new_x)
