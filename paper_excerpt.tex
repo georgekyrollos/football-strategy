@@ -397,25 +397,25 @@ publicly, the clock stops immediately, and the other team gains nothing by also 
 (they would merely spend their own timeout for no additional clock benefit).  The correct
 model is therefore \emph{sequential and pure-strategy}, not simultaneous.
 
-Let $k'= \textsc{TimeoutReduce}(k)$ and define the four continuation values from the
+Let $k'= \textsc{TimeoutReduce}(k)$ and define three continuation values from the
 resulting state $s'$ (looked up from the appropriate timeout-count slice):
 \begin{align*}
-  a &= V^{(\theta_1-1,\,\theta_2-1)}(s',\,k') \quad \text{(both call)},\\
-  b &= V^{(\theta_1-1,\,\theta_2)}(s',\,k')   \quad \text{(offense calls only)},\\
-  c &= V^{(\theta_1,\,\theta_2-1)}(s',\,k')   \quad \text{(defense calls only)},\\
+  b &= V^{(\theta_1-1,\,\theta_2)}(s',\,k')   \quad \text{(offense calls)},\\
+  c &= V^{(\theta_1,\,\theta_2-1)}(s',\,k')   \quad \text{(defense calls)},\\
   d &= V^{(\theta_1,\,\theta_2)}(s',\,k)       \quad \text{(neither calls)}.
 \end{align*}
+The ``both call'' case is structurally absent.  This is a zero-sum game: reduced clock
+time benefits exactly one team, so only that team has an incentive to call a timeout.
+Both teams calling simultaneously is never rational.
 
-The offense announces its decision first; the defense then responds optimally.  If the
-offense calls, the clock is stopped and the defense can call as well---but since the
-clock has already stopped, calling only costs the defense a timeout without further
-benefit, so the defense calls iff $a < b$ (i.e., spending its timeout lowers the
-offense's continuation value).  The offense therefore receives $\min(a,b)$ when it calls.
-If the offense does not call, the defense calls iff $c < d$, giving the offense $\min(c,d)$.
-The offense maximizes:
+The offense announces its decision first; the defense then responds optimally.
+If the offense calls, the clock stops---the defense gains nothing by also calling, as it
+would only spend a timeout for zero additional benefit.  The offense therefore receives
+$b$.  If the offense does not call, the defense calls iff $c < d$, giving the offense
+$\min(c,d)$.  The offense maximizes:
 \begin{equation}
   \label{eq:to_subgame}
-  V_{\text{TO}} = \max\!\bigl(\min(a,b),\; \min(c,d)\bigr).
+  V_{\text{TO}} = \max\!\bigl(b,\; \min(c,d)\bigr).
 \end{equation}
 This is always a pure strategy for both sides.  The value $V_{\text{TO}}$ replaces the
 plain $V^{(\theta_1,\theta_2)}(s',k)$ lookup in the outer LP.
@@ -434,9 +434,10 @@ are solved in order of increasing $\theta_1 + \theta_2$:
 The $(0,0)$ table is identical to the Stage~1 solution and is loaded from the pre-computed
 file.  For each subsequent $(\theta_1,\theta_2)$, a full backward-induction pass is
 performed using the TO sub-game for every state, looking up predecessor tables
-$V^{(\theta_1-1,\theta_2)}$, $V^{(\theta_1,\theta_2-1)}$, and
-$V^{(\theta_1-1,\theta_2-1)}$ as needed.  Tables that are no longer needed as predecessors
-are evicted from memory; at most four tables reside in RAM simultaneously.
+$V^{(\theta_1-1,\theta_2)}$ and $V^{(\theta_1,\theta_2-1)}$ as needed.  The
+$V^{(\theta_1-1,\theta_2-1)}$ table is never needed (both-call case eliminated).
+Tables that are no longer needed as predecessors are evicted from memory; at most
+three tables reside in RAM simultaneously.
 
 The game-relevant output is $V^{(3,3)}$, the value table for both teams beginning the
 quarter with three timeouts.  The full Stage~2 solve requires approximately $15\times$ the
