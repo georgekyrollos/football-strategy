@@ -390,35 +390,22 @@ respectively.
 
 \subsection{The Post-Play Timeout Sub-Game}
 
-After each play completes with tick cost $k$, both teams have the option to call a
-timeout before the clock advances, reducing the charge to $k' < k$.  Calling a timeout
-is an \emph{open, observable action} in \emph{Football Strategy}: it is announced
-publicly, the clock stops immediately, and the other team gains nothing by also calling
-(they would merely spend their own timeout for no additional clock benefit).  The correct
-model is therefore \emph{sequential and pure-strategy}, not simultaneous.
-
-Let $k'= \textsc{TimeoutReduce}(k)$ and define three continuation values from the
-resulting state $s'$ (looked up from the appropriate timeout-count slice):
+After each play completes with tick cost $k$, either team may call a timeout to reduce
+the clock charge to $k' < k$.  Let
 \begin{align*}
-  b &= V^{(\theta_1-1,\,\theta_2)}(s',\,k')   \quad \text{(offense calls)},\\
-  c &= V^{(\theta_1,\,\theta_2-1)}(s',\,k')   \quad \text{(defense calls)},\\
-  d &= V^{(\theta_1,\,\theta_2)}(s',\,k)       \quad \text{(neither calls)}.
+  a &= V^{(\theta_1-1,\,\theta_2)}(s',\,k')   \quad \text{(offense calls)},\\
+  b &= V^{(\theta_1,\,\theta_2-1)}(s',\,k')   \quad \text{(defense calls)},\\
+  c &= V^{(\theta_1,\,\theta_2)}(s',\,k)       \quad \text{(neither calls)}.
 \end{align*}
-The ``both call'' case is structurally absent.  This is a zero-sum game: reduced clock
-time benefits exactly one team, so only that team has an incentive to call a timeout.
-Both teams calling simultaneously is never rational.
-
-The offense announces its decision first; the defense then responds optimally.
-If the offense calls, the clock stops---the defense gains nothing by also calling, as it
-would only spend a timeout for zero additional benefit.  The offense therefore receives
-$b$.  If the offense does not call, the defense calls iff $c < d$, giving the offense
-$\min(c,d)$.  The offense maximizes:
+Because this is a zero-sum game, reduced clock time can benefit at most one team, so
+both calling simultaneously is never rational.  Since at most one team will call, the
+order of decisions is irrelevant: whichever team benefits simply calls, and the other
+does not.  The sub-game value is therefore
 \begin{equation}
   \label{eq:to_subgame}
-  V_{\text{TO}} = \max\!\bigl(b,\; \min(c,d)\bigr).
+  V_{\text{TO}} = \max\!\bigl(a,\;\min(b,\,c)\bigr),
 \end{equation}
-This is always a pure strategy for both sides.  The value $V_{\text{TO}}$ replaces the
-plain $V^{(\theta_1,\theta_2)}(s',k)$ lookup in the outer LP.
+which replaces the plain $V^{(\theta_1,\theta_2)}(s',k)$ lookup in the outer LP.
 
 \subsection{Layered Solve Architecture}
 

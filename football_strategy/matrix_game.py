@@ -447,34 +447,34 @@ from football_strategy.constants import TIMEOUT_REDUCE
 
 
 def _solve_to_subgame(
-    b: float, c: float, d: float,
+    a: float, b: float, c: float,
     off_has_to: bool, def_has_to: bool,
 ) -> float:
-    """Solve the post-play timeout decision (pure strategy, sequential).
+    """Solve the post-play timeout decision (pure strategy).
 
-    Zero-sum insight: less clock benefits exactly one side, so the two teams
-    will NEVER both call — the "both call" case is structurally impossible.
+        a = V(k', to_off-1, to_def  )  offense calls
+        b = V(k', to_off,   to_def-1)  defense calls
+        c = V(k,  to_off,   to_def  )  neither calls
 
-        b = V(k', to_off-1, to_def  )  offense calls  (clock stops; defense won't also call)
-        c = V(k', to_off,   to_def-1)  defense calls  (only if offense did not)
-        d = V(k,  to_off,   to_def  )  neither calls
+    Zero-sum: reduced clock benefits exactly one side, so at most one team
+    calls — never both.  Because at most one call occurs, the order of
+    decisions is irrelevant: whoever benefits calls, the other does not.
 
-    Sequential (offense first):
-      If offense calls → clock stopped → defense has no reason to also call → offense gets b.
-      If offense doesn't → defense calls iff c < d → offense gets min(c, d).
-      Offense maximises: max(b, min(c, d)).
+        offense calls iff a > c  →  value = a
+        defense calls iff b < c  →  value = b
+        otherwise neither calls  →  value = c
     """
     if not off_has_to and not def_has_to:
-        return d
+        return c
 
     if not off_has_to:
-        return min(c, d)            # defense alone decides
+        return min(b, c)            # defense calls iff beneficial
 
     if not def_has_to:
-        return max(b, d)            # offense alone decides
+        return max(a, c)            # offense calls iff beneficial
 
-    # Both have TOs — sequential, no "both call" case.
-    return max(b, min(c, d))
+    # Both have TOs — at most one will call.
+    return max(a, min(b, c))
 
 
 def _lookup_with_to(
@@ -489,15 +489,14 @@ def _lookup_with_to(
 
     For a single SuccessorTemplate with ticks=k:
     - If k cannot be reduced (PAT=0, or TIMEOUT_REDUCE[k]==k): plain lookup.
-    - Otherwise: build a reduced template (ticks=k') and solve the sequential
-      timeout sub-game.  Only two additional slices are consulted (never both):
+    - Otherwise: build a reduced template (ticks=k') and solve the timeout
+      sub-game.  Three slices are consulted:
 
-        d  : (to_off,   to_def  )  — neither calls, ticks=k
-        b  : (to_off-1, to_def  )  — offense calls,  ticks=k'
-        c  : (to_off,   to_def-1)  — defense calls,  ticks=k'
+        c  : (to_off,   to_def  )  — neither calls, ticks=k
+        a  : (to_off-1, to_def  )  — offense calls,  ticks=k'
+        b  : (to_off,   to_def-1)  — defense calls,  ticks=k'
 
-    The "both call" slice (to_off-1, to_def-1) is never needed: zero-sum means
-    only one team benefits from stopping the clock, so they never both call.
+    The "both call" slice is never needed (zero-sum: at most one team calls).
     """
     k = tmpl.ticks
     k_prime = TIMEOUT_REDUCE.get(k, k)
@@ -516,34 +515,33 @@ def _lookup_with_to(
         delta_change=tmpl.delta_change,
     )
 
-    # d: neither calls — normal ticks, same TOs
-    d = lookup_val(to_store.get(to_off, to_def), tmpl, q, tau)
+    # c: neither calls — normal ticks, same TOs
+    c = lookup_val(to_store.get(to_off, to_def), tmpl, q, tau)
 
-    # b: offense calls — reduced ticks, offense loses 1 TO
-    # c: defense calls — reduced ticks, defense loses 1 TO
-    # "both call" case eliminated: zero-sum means only one side benefits from
-    # stopping the clock, so they never both call.
+    # a: offense calls — reduced ticks, offense loses 1 TO
+    # b: defense calls — reduced ticks, defense loses 1 TO
+    # "both call" case eliminated (zero-sum: at most one side benefits).
     #
     # k'=0: advance_clock(tau, q, 0) = tau, so the lookup targets the SAME tau
     # in the predecessor store.  States may be absent if genuinely unreachable
-    # via 0-tick transitions (e.g. safety_kick at tau=7).  Fall back to d.
+    # via 0-tick transitions (e.g. safety_kick at tau=7).  Fall back to c.
     effective_off = to_off > 0
-    b = 0.0
+    a = 0.0
     if effective_off:
         try:
-            b = lookup_val(to_store.get(to_off - 1, to_def), tmpl_r, q, tau)
+            a = lookup_val(to_store.get(to_off - 1, to_def), tmpl_r, q, tau)
         except KeyError:
             effective_off = False
 
     effective_def = to_def > 0
-    c = 0.0
+    b = 0.0
     if effective_def:
         try:
-            c = lookup_val(to_store.get(to_off, to_def - 1), tmpl_r, q, tau)
+            b = lookup_val(to_store.get(to_off, to_def - 1), tmpl_r, q, tau)
         except KeyError:
             effective_def = False
 
-    return _solve_to_subgame(b, c, d, effective_off, effective_def)
+    return _solve_to_subgame(a, b, c, effective_off, effective_def)
 
 
 def _resolve_templates_to(
