@@ -40,5 +40,5 @@ solve_with_timeouts(
     base_path="q4_full_v.npz",
     out_prefix="q4_to_v",
     use_tqdm=True,
-    n_workers=8,
+    n_workers=8,  # combos at the same level run in parallel, workers split across them
 )

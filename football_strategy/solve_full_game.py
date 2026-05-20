@@ -379,6 +379,22 @@ _TO_WORKER_OFF: int = 0
 _TO_WORKER_DEF: int = 0
 
 
+def _run_combo_worker(args: tuple) -> str:
+    """Top-level worker for combo-level parallelism (fork context).
+
+    Runs one full (to_off, to_def) backward induction pass, saves the result
+    to disk, and returns the save path.  All heavy state (to_store, layers,
+    charts) is inherited copy-on-write from the parent fork.
+    """
+    sc, pc, to_off, to_def, to_store, layers, save_path, n_workers_inner = args
+    V_new = _solve_one_to_combo(
+        sc, pc, to_off, to_def, to_store, layers,
+        verbose=False, n_workers=n_workers_inner,
+    )
+    V_new.save(save_path)
+    return save_path
+
+
 def _solve_key_to_worker(key: tuple) -> Tuple[tuple, float]:
     """Worker entry point for the TO solve pass (fork-inherited globals)."""
     q, tau = key[1], key[2]
@@ -654,57 +670,83 @@ def solve_with_timeouts(
 
     try:
         for total in sorted(combos_by_total):
-            for to_off, to_def in combos_by_total[total]:
-                t0 = time.time()
+            combos = combos_by_total[total]
+            t0 = time.time()
+
+            # Combos at the same total level are independent: they only read
+            # from lower-total tables (already fully solved).  Run them in
+            # parallel forked processes, splitting available workers evenly.
+            n_parallel = min(len(combos), n_workers)
+            workers_each = max(1, n_workers // n_parallel)
+
+            if n_parallel > 1:
+                if verbose:
+                    print(f"\n--- total={total}: {len(combos)} combos in parallel "
+                          f"({n_parallel} processes × {workers_each} workers) ---")
+
+                tasks = [
+                    (scrimmage_chart, punt_chart, to_off, to_def, to_store, layers,
+                     f"{out_prefix}_to{to_off}{to_def}", workers_each)
+                    for to_off, to_def in combos
+                ]
+                ctx = multiprocessing.get_context("fork")
+                with ctx.Pool(n_parallel) as pool:
+                    pool.map(_run_combo_worker, tasks)
+
+                # Reload all results from disk into to_store
+                for to_off, to_def in combos:
+                    path = f"{out_prefix}_to{to_off}{to_def}.npz"
+                    to_store.add(to_off, to_def, ValueStore.load(path))
 
                 if outer_bar is not None:
-                    outer_bar.set_description(
-                        f"combo ({to_off},{to_def}) [total={total}]"
+                    outer_bar.update(len(combos))
+
+            else:
+                # Single combo (or n_workers=1): run sequentially with full workers
+                for to_off, to_def in combos:
+                    if outer_bar is not None:
+                        outer_bar.set_description(f"combo ({to_off},{to_def}) [total={total}]")
+
+                    if verbose:
+                        print(f"\n{'='*60}")
+                        print(f"Solving (to_off={to_off}, to_def={to_def})  [total={total}]")
+                        print(f"{'='*60}")
+
+                    inner_bar = (
+                        _tqdm(
+                            total=tau_steps_per_combo,
+                            desc=f"  ({to_off},{to_def}) τ-layers",
+                            unit="τ", position=1, leave=False,
+                        )
+                        if use_tqdm and _have_tqdm else None
                     )
+                    try:
+                        V_new = _solve_one_to_combo(
+                            scrimmage_chart, punt_chart,
+                            to_off, to_def, to_store, layers,
+                            verbose=verbose, n_workers=n_workers,
+                            parallel_min_layer=parallel_min_layer,
+                            pbar=inner_bar,
+                        )
+                    finally:
+                        if inner_bar is not None:
+                            inner_bar.close()
 
-                if verbose:
-                    print(f"\n{'='*60}")
-                    print(f"Solving (to_off={to_off}, to_def={to_def})  [total={total}]")
-                    print(f"{'='*60}")
+                    save_path_s = f"{out_prefix}_to{to_off}{to_def}"
+                    V_new.save(save_path_s)
 
-                inner_bar = (
-                    _tqdm(
-                        total=tau_steps_per_combo,
-                        desc=f"  ({to_off},{to_def}) τ-layers",
-                        unit="τ",
-                        position=1,
-                        leave=False,
-                    )
-                    if use_tqdm and _have_tqdm else None
-                )
+                    elapsed = time.time() - t0
+                    if verbose:
+                        print(f"  Saved {save_path_s}.npz  ({len(V_new):,} slots, {elapsed:.1f}s)")
 
-                try:
-                    V_new = _solve_one_to_combo(
-                        scrimmage_chart, punt_chart,
-                        to_off, to_def, to_store, layers,
-                        verbose=verbose, n_workers=n_workers,
-                        parallel_min_layer=parallel_min_layer,
-                        pbar=inner_bar,
-                    )
-                finally:
-                    if inner_bar is not None:
-                        inner_bar.close()
+                    if outer_bar is not None:
+                        outer_bar.update(1)
+                        outer_bar.set_postfix(saved=f"to{to_off}{to_def}", elapsed=f"{elapsed:.0f}s")
 
-                # Save to disk immediately (frees us to evict from RAM later)
-                save_path = f"{out_prefix}_to{to_off}{to_def}"
-                V_new.save(save_path)
+            if verbose:
+                print(f"  total={total} done in {time.time()-t0:.1f}s")
 
-                elapsed = time.time() - t0
-                if verbose:
-                    print(f"  Saved {save_path}.npz  ({len(V_new):,} slots, {elapsed:.1f}s)")
-
-                if outer_bar is not None:
-                    outer_bar.update(1)
-                    outer_bar.set_postfix(
-                        saved=f"to{to_off}{to_def}", elapsed=f"{elapsed:.0f}s"
-                    )
-
-            # All combos at this total are done — evict predecessors no longer needed
+            # Evict tables no longer needed as predecessors
             to_store.evict_stale(total)
     finally:
         if outer_bar is not None:
