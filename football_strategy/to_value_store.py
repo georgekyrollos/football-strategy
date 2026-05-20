@@ -1,16 +1,16 @@
 """
 ToValueStore — manages 16 ValueStore instances, one per (to_off, to_def) pair.
 
-Used by the Stage 2 solver to integrate timeout decisions into the game value.
+Timeout counts are not added to the state tuple; instead we keep one ValueStore
+per (to_off, to_def) ∈ {0..3}² and solve them in order of increasing to_off+to_def.
 
-Solve order: increasing to_off + to_def.
-  total=0: (0,0)   ← Stage 1 (no timeouts) — seed from q4_full_v.npz
+  total=0: (0,0)   ← base case (no timeouts remaining)
   total=1: (1,0), (0,1)
   ...
-  total=6: (3,3)   ← final product (game starts with 3 TOs per team)
+  total=6: (3,3)   ← game-relevant result (both teams start with 3 TOs)
 
-Peak RAM during solve: at most 4 ValueStore instances simultaneously
-  (the current combo + its 3 immediate predecessors needed for the 2×2 sub-game).
+Peak RAM during solve: at most 3 ValueStore instances simultaneously
+  (the current combo + its 2 immediate predecessors for the sub-game lookups).
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ class ToValueStore:
 
     Usage (solve loop):
         store = ToValueStore()
-        store.add(0, 0, ValueStore.load("q4_full_v.npz"))   # seed Stage 1
+        store.add(0, 0, ValueStore.load("q4_full_v.npz"))   # base case (no TOs remaining)
         for to_off, to_def in solve_order(MAX_TOS):
             V_new = solve_one_combo(to_off, to_def, store)  # builds new ValueStore
             store.add(to_off, to_def, V_new)

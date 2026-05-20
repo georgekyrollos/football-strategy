@@ -359,22 +359,18 @@ def _replace_qt(key: tuple, q: int, tau: int) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# Stage 2 — Timeout-aware solve
+# Timeout-aware solve
 # ---------------------------------------------------------------------------
-# Adds optimal timeout decisions to the game value.
-#
-# Key insight: TOs are NOT added to the state tuple.  Instead we maintain
-# 16 separate ValueStore instances (one per (to_off, to_def) ∈ {0..3}²) and
-# solve them in order of increasing to_off + to_def.  The (0,0) case is
-# identical to Stage 1 and is seeded from the existing solved file.
-#
-# For each new (to_off, to_def), the solve is a full backward induction pass
-# using the TO-aware cell computation: after each play outcome (ticks=k,
-# next_core), both teams play a 2×2 sub-game to decide whether to call a
-# timeout (see matrix_game._solve_to_subgame).
+# TOs are NOT added to the state tuple.  Instead we maintain 16 separate
+# ValueStore instances (one per (to_off, to_def) ∈ {0..3}²) and solve them
+# in order of increasing to_off + to_def.  The (0,0) base case is seeded
+# from the no-timeout solve.  For each new (to_off, to_def), the solve is a
+# full backward induction pass using the TO-aware cell computation: after
+# each play outcome (ticks=k, next_core), the post-play sub-game determines
+# which team (if any) calls a timeout (see matrix_game._solve_to_subgame).
 # ---------------------------------------------------------------------------
 
-# Fork-worker globals for the TO solve pass (separate from Stage 1 globals)
+# Fork-worker globals for the TO solve pass
 _TO_WORKER_SC: Optional[Dict] = None
 _TO_WORKER_PC: Optional[Dict] = None
 _TO_WORKER_V:  Optional[ValueStore] = None   # V currently being built
@@ -384,7 +380,7 @@ _TO_WORKER_DEF: int = 0
 
 
 def _solve_key_to_worker(key: tuple) -> Tuple[tuple, float]:
-    """Worker entry point for Stage 2 (fork-inherited globals)."""
+    """Worker entry point for the TO solve pass (fork-inherited globals)."""
     q, tau = key[1], key[2]
     return key, _solve_key_to(
         _TO_WORKER_SC, _TO_WORKER_PC, key, q, tau,
@@ -403,7 +399,7 @@ def _solve_key_to(
     to_off: int,
     to_def: int,
 ) -> float:
-    """Per-state dispatcher for Stage 2 (TO-aware).
+    """Per-state dispatcher for the TO-aware solve pass.
 
     Mirrors _solve_key but uses build_scrimmage_payoff_matrix_to,
     kickoff_state_value_to, and safety_kick_state_value_to from matrix_game.
@@ -450,7 +446,7 @@ def _solve_quarter_to(
     parallel_min_layer: int,
     pbar=None,          # optional tqdm bar; updated once per tau layer
 ) -> None:
-    """Quarter solve for Stage 2 — writes into V_new using to_store for lookups."""
+    """Quarter solve for one (to_off, to_def) combo — writes into V_new using to_store for lookups."""
     global _TO_WORKER_SC, _TO_WORKER_PC, _TO_WORKER_V
     global _TO_WORKER_STORE, _TO_WORKER_OFF, _TO_WORKER_DEF
 
@@ -586,21 +582,21 @@ def solve_with_timeouts(
     punt_chart: Dict,
     start_key: tuple,
     *,
-    stage1_path: str = "q4_full_v.npz",
+    base_path: str = "q4_full_v.npz",
     out_prefix: str = "q4_to_v",
     verbose: bool = False,
     use_tqdm: bool = True,
     n_workers: int = 1,
     parallel_min_layer: int = 200,
 ) -> object:
-    """Stage 2 solve: compute V for all 16 (to_off, to_def) combinations.
+    """Solve all 16 (to_off, to_def) timeout-count combinations.
 
     Parameters
     ----------
     scrimmage_chart : output of chart_parser.load_scrimmage_chart()
     punt_chart      : output of chart_parser.load_punt_chart()
     start_key       : opening kickoff key (same as solve_full_game)
-    stage1_path     : path to the Stage 1 solution (seeded as (0,0))
+    base_path       : path to the (0,0) base solve (no timeouts remaining)
     out_prefix      : prefix for output files; combo (a,b) → '<prefix>_to{a}{b}.npz'
     verbose         : if True, print per-layer progress
     n_workers       : parallel workers for each combo (fork-based)
@@ -623,9 +619,9 @@ def solve_with_timeouts(
 
     to_store = ToValueStore()
 
-    # Seed (0,0) from Stage 1
-    print(f"Loading Stage 1 from {stage1_path} ...")
-    v00 = ValueStore.load(stage1_path)
+    # Load (0,0) base case (no timeouts remaining)
+    print(f"Loading base solve from {base_path} ...")
+    v00 = ValueStore.load(base_path)
     to_store.add(0, 0, v00)
     print(f"  {len(v00):,} solved slots loaded\n")
 
@@ -652,7 +648,7 @@ def solve_with_timeouts(
     tau_steps_per_combo = 4 * TICKS_PER_QUARTER
 
     outer_bar = (
-        _tqdm(total=n_combos, desc="Stage 2", unit="combo", position=0, leave=True)
+        _tqdm(total=n_combos, desc="TO combos", unit="combo", position=0, leave=True)
         if use_tqdm and _have_tqdm else None
     )
 
@@ -663,7 +659,7 @@ def solve_with_timeouts(
 
                 if outer_bar is not None:
                     outer_bar.set_description(
-                        f"Stage 2  combo ({to_off},{to_def}) [total={total}]"
+                        f"combo ({to_off},{to_def}) [total={total}]"
                     )
 
                 if verbose:
@@ -715,7 +711,7 @@ def solve_with_timeouts(
             outer_bar.close()
 
     elapsed_total = time.time() - t_wall
-    print(f"\nStage 2 complete — {elapsed_total/3600:.2f}h total")
+    print(f"\nTO solve complete — {elapsed_total/3600:.2f}h total")
     print(f"Output files: {out_prefix}_to{{a}}{{b}}.npz  (16 combos)")
     print(f"Primary result (3 TOs each): {out_prefix}_to33.npz")
 

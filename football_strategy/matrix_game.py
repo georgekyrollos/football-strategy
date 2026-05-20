@@ -429,11 +429,10 @@ def safety_kick_state_value(
 
 
 # ---------------------------------------------------------------------------
-# Stage 2 — Timeout-aware variants
+# Timeout-aware variants
 # ---------------------------------------------------------------------------
-# These functions integrate the 2×2 post-play timeout sub-game into the cell
-# value computation.  They are self-contained: the existing Stage 1 functions
-# above are unchanged and continue to work independently.
+# These functions integrate the post-play timeout sub-game into the cell
+# value computation.
 #
 # Design:
 #   After a play produces outcome (ticks=k, next_core=C), both teams

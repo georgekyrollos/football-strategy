@@ -41,9 +41,8 @@ finite-horizon two-player zero-sum stochastic game and applying exact backward i
 every matrix-game entry becomes the true equilibrium continuation value of the resulting
 game state.  The solver determines optimal play across all ${\sim}30$ million reachable
 states of the fourth quarter, selecting between punt, field goal, and scrimmage plays based
-on actual win probability rather than proxy rewards.  We additionally model each team's
-three timeouts per half as a sequential pure-strategy sub-game resolved after each play,
-extending the solution to full timeout-aware equilibrium strategies.  We describe the
+on actual win probability rather than proxy rewards.  Each team's three timeouts per half are modeled as a pure-strategy sequential
+sub-game resolved after each play, so the solution reflects optimal timeout usage.  We describe the
 mathematical formulation, state-space representation, solution algorithm, and computational
 architecture, and compare the approach explicitly to McCulloch's method.
 \end{abstract}
@@ -164,9 +163,7 @@ where:
 \end{itemize}
 \end{definition}
 
-\noindent Stage~1 of the solver fixes $\theta_1 = \theta_2 = 0$; Stage~2 extends the
-solution to all 16 combinations $(\theta_1,\theta_2) \in \{0,1,2,3\}^2$, with the full
-game starting at $\theta_1 = \theta_2 = 3$.
+\noindent The full game starts at $\theta_1 = \theta_2 = 3$.
 
 \noindent In addition to scrimmage states, the game includes \emph{kickoff states}
 $(q,\tau,\delta,h)$ and \emph{safety-kick states} $(q,\tau,\delta,h)$.
@@ -363,7 +360,7 @@ any read of an unsolved slot raises a \texttt{KeyError}, detecting dependency er
 immediately.
 
 %────────────────────────────────────────────────────────────────────────────────
-\section{Timeout Extension (Stage~2)}
+\section{Timeout Decisions}
 \label{sec:timeouts}
 %────────────────────────────────────────────────────────────────────────────────
 
@@ -409,26 +406,17 @@ which replaces the plain $V^{(\theta_1,\theta_2)}(s',k)$ lookup in the outer LP.
 
 \subsection{Layered Solve Architecture}
 
-Adding timeouts to the state would multiply the state-space by $4^2 = 16$.  Instead, we
-maintain 16 separate value tables $V^{(\theta_1,\theta_2)}$, each a full copy of the
-Stage~1 array layout ($\approx 823$~MB per table, $\approx 13$~GB total).  The tables
-are solved in order of increasing $\theta_1 + \theta_2$:
-
+Adding timeouts to the state tuple would multiply the state space by $4^2 = 16$.
+Instead, we maintain 16 separate value tables $V^{(\theta_1,\theta_2)}$, each with the
+same array layout as the no-timeout base ($\approx 823$~MB per table, $\approx 13$~GB
+total).  The tables are solved in order of increasing $\theta_1 + \theta_2$:
 \[
   (0,0) \;\to\; (1,0),\,(0,1) \;\to\; (2,0),\,(1,1),\,(0,2) \;\to\; \cdots \;\to\; (3,3).
 \]
-
-The $(0,0)$ table is identical to the Stage~1 solution and is loaded from the pre-computed
-file.  For each subsequent $(\theta_1,\theta_2)$, a full backward-induction pass is
-performed using the TO sub-game for every state, looking up predecessor tables
-$V^{(\theta_1-1,\theta_2)}$ and $V^{(\theta_1,\theta_2-1)}$ as needed.  The
-$V^{(\theta_1-1,\theta_2-1)}$ table is never needed (both-call case eliminated).
-Tables that are no longer needed as predecessors are evicted from memory; at most
-three tables reside in RAM simultaneously.
-
-The game-relevant output is $V^{(3,3)}$, the value table for both teams beginning the
-quarter with three timeouts.  The full Stage~2 solve requires approximately $15\times$ the
-wall-clock time of Stage~1.
+The $(0,0)$ table (no timeouts remaining) is solved first and serves as the base case.
+Each subsequent $(\theta_1,\theta_2)$ requires a full backward-induction pass, with the
+post-play sub-game looking up already-solved predecessor tables.  The game-relevant
+output is $V^{(3,3)}$: both teams begin with three timeouts.
 
 %────────────────────────────────────────────────────────────────────────────────
 \section{Comparison to McCulloch's Method}
@@ -479,7 +467,7 @@ Aspect & McCulloch (2004) & This work \\
   & & 16-table layered solve \\[2pt]
 \textbf{State space solved} &
   Each play independently &
-  ${\sim}30$M $\times$ 16 TO combos (Q4) \\[2pt]
+  ${\sim}30$M states $\times$ 16 TO combos \\[2pt]
 \textbf{Tunable parameters} &
   Several heuristic constants &
   None \\
@@ -538,9 +526,9 @@ clock layers via forward BFS.  Of these, approximately 615,000 are unique
 multiple clock values.  Each scrimmage state requires solving a matrix LP with at most 22
 rows (offense actions) and 10 columns (defense cards).
 
-The solve runs in approximately 8 hours on an 8-core machine using parallel LP solving
-within each clock layer.  The resulting value table is stored in approximately $823$~MB as
-a dense NumPy array.
+The no-timeout base ($\theta_1=\theta_2=0$) runs in approximately 8 hours on an
+8-core machine; the full 16-table solve requires approximately $16\times$ that time.
+Each value table is stored in approximately $823$~MB as a dense NumPy array.
 
 The value $V(s_0)$ at the initial kickoff state $(q=4,\tau=60,\delta=0)$ gives the exact
 win probability for the team kicking off at the start of the fourth quarter under a tied

@@ -1,8 +1,10 @@
-"""Full solve: Stage 1 (no timeouts) then Stage 2 (all 16 TO combinations).
+"""Solve Football Strategy Q4 with full timeout support.
 
 Writes:
-  q4_full_v.npz            — Stage 1 solution (Ball Control, Q4, no timeouts)
-  q4_to_v_to{a}{b}.npz    — Stage 2 solutions for (a,b) in {0..3}²
+  q4_full_v.npz            — base solve (no timeouts remaining for either team)
+  q4_to_v_to{a}{b}.npz    — all 16 timeout-count combinations (a,b) in {0..3}²
+
+The game-relevant result is q4_to_v_to33.npz (both teams start with 3 TOs).
 
 Run:
     source .venv/bin/activate
@@ -22,8 +24,8 @@ print(f"Chart: {_DEFAULT_CSV}")
 sc = load_scrimmage_chart()
 pc = load_punt_chart()
 
-# ── Stage 1 ──────────────────────────────────────────────────────────────────
-print("\n=== STAGE 1: full backward induction, no timeouts ===")
+# ── Base solve (θ₁=θ₂=0) ─────────────────────────────────────────────────────
+print("\n=== Base solve: backward induction, no timeouts remaining ===")
 solve_full_game(
     sc, pc, START_KEY,
     verbose=True,
@@ -31,11 +33,11 @@ solve_full_game(
     save_path="q4_full_v",
 )
 
-# ── Stage 2 ──────────────────────────────────────────────────────────────────
-print("\n=== STAGE 2: all 16 timeout combinations ===")
+# ── Full solve: all 16 timeout-count combinations ────────────────────────────
+print("\n=== Full solve: all 16 (to_off, to_def) combinations ===")
 solve_with_timeouts(
     sc, pc, START_KEY,
-    stage1_path="q4_full_v.npz",
+    base_path="q4_full_v.npz",
     out_prefix="q4_to_v",
     use_tqdm=True,
     n_workers=8,
