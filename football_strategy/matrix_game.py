@@ -478,22 +478,19 @@ def _solve_to_subgame(
         # Offense alone can call: offense maximises → picks max(b, d)
         return max(b, d)
 
-    # Both teams have TOs — full 2×2 zero-sum game.
-    # Check for pure Nash equilibrium (saddle point).
-    maximin = max(min(a, b), min(c, d))   # max of row-minima (offense's guarantee)
-    minimax = min(max(a, c), max(b, d))   # min of col-maxima (defense's guarantee)
-    if abs(maximin - minimax) < 1e-9:
-        return maximin                  # pure NE
-
-    # Mixed Nash equilibrium — standard closed-form 2×2 solution.
-    # offense's equilibrium probability p of calling TO satisfies:
-    #   p*a + (1-p)*c = p*b + (1-p)*d  →  p = (d-c)/(a-b-c+d)
-    denom = a - b - c + d
-    if abs(denom) < 1e-12:
-        # Degenerate (payoffs nearly constant across columns for offense)
-        return (a + d) / 2
-    p = max(0.0, min(1.0, (d - c) / denom))
-    return p * a + (1.0 - p) * c
+    # Both teams have TOs.
+    #
+    # Timeout calling is an OPEN, observable action: once one team calls, the
+    # clock stops and the other team gains nothing by also calling (they would
+    # only waste their own TO).  The correct model is therefore sequential, not
+    # simultaneous: offense announces first, defense responds optimally.
+    #
+    #   If offense calls:    defense calls iff a < b  →  offense gets min(a, b)
+    #   If offense doesn't:  defense calls iff c < d  →  offense gets min(c, d)
+    #   Offense maximises:   max(min(a, b), min(c, d))  — the maximin value
+    #
+    # This is always a pure strategy (no randomisation).
+    return max(min(a, b), min(c, d))
 
 
 def _lookup_with_to(

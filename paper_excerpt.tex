@@ -1,0 +1,593 @@
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=1.1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{caption}
+
+\hypersetup{colorlinks=true, linkcolor=blue!60!black, citecolor=blue!60!black, urlcolor=blue!60!black}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
+
+\title{\textbf{Exact Equilibrium Solutions for the Board Game \emph{Football Strategy}:
+A Full-Game Backward-Induction Solver}\\[6pt]
+\large An Extension of McCulloch's Game-Theoretic Agent}
+
+\author{George Kyrollos}
+
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+McCulloch~\cite{mcculloch} demonstrated that each individual scrimmage play in Avalon
+Hill's board game \emph{Football Strategy} constitutes a two-player zero-sum matrix game,
+and designed an agent that solves each play in isolation using mixed-strategy Nash
+equilibrium.  To make the agent sensitive to game context---field position, down, distance,
+score, and clock---McCulloch augmented the raw yardage payoffs with hand-crafted heuristic
+bonuses.  We replace that heuristic layer entirely.  By modeling the complete game as a
+finite-horizon two-player zero-sum stochastic game and applying exact backward induction,
+every matrix-game entry becomes the true equilibrium continuation value of the resulting
+game state.  The solver determines optimal play across all ${\sim}30$ million reachable
+states of the fourth quarter, selecting between punt, field goal, and scrimmage plays based
+on actual win probability rather than proxy rewards.  We additionally model each team's
+three timeouts per half as a sequential pure-strategy sub-game resolved after each play,
+extending the solution to full timeout-aware equilibrium strategies.  We describe the
+mathematical formulation, state-space representation, solution algorithm, and computational
+architecture, and compare the approach explicitly to McCulloch's method.
+\end{abstract}
+
+%────────────────────────────────────────────────────────────────────────────────
+\section{Introduction}
+\label{sec:intro}
+%────────────────────────────────────────────────────────────────────────────────
+
+\emph{Football Strategy} (Avalon Hill, 1969) is a two-player board game that abstracts
+American football into a sequence of simultaneous-move interactions.  On each scrimmage
+play the offense secretly selects one of up to 22 actions while the defense simultaneously
+selects one of ten cards (A--J); the intersection on a printed chart determines the
+result---yardage, an incomplete pass, a fumble, an interception, a penalty, or a score.
+Because both players choose without observing the opponent's action, the play is exactly a
+$|O|\times 10$ two-player zero-sum matrix game.
+
+McCulloch~\cite{mcculloch} was the first to exploit this structure algorithmically.  His
+agent solves each matrix game using linear programming to obtain a mixed-strategy Nash
+equilibrium.  The key challenge is assigning \emph{utility} to each chart outcome: a raw
+yardage gain of $+7$ is not inherently better or worse than a gain of $+4$ without knowing
+the down, distance, score, clock, and field position.  McCulloch addressed this with a set
+of hand-tuned bonuses---for first downs, touchdowns, turnovers, and fourth-down
+conversions---that effectively map game states to a scalar reward.  While principled in
+spirit, these heuristics are necessarily approximate and do not guarantee that the agent's
+play is optimal for the actual game of \emph{Football Strategy}.
+
+Our contribution is to eliminate the heuristic layer completely.  Instead of assigning an
+ad-hoc scalar to each outcome, we assign it the \emph{exact equilibrium continuation value}
+of the full game state it produces.  This requires solving ${\sim}30$ million linked matrix
+games simultaneously via backward induction over the complete finite game tree.  The result
+is a provably optimal strategy---in the sense of the minimax theorem for finite two-player
+zero-sum stochastic games---for the fourth quarter of \emph{Football Strategy}.
+
+%────────────────────────────────────────────────────────────────────────────────
+\section{McCulloch's Approach and Its Limitations}
+\label{sec:mcculloch}
+%────────────────────────────────────────────────────────────────────────────────
+
+McCulloch's agent operates as follows.  At each scrimmage state it constructs a payoff
+matrix $A \in \mathbb{R}^{|O|\times 10}$ where entry $A_{a,b}$ is the utility assigned to
+the outcome produced by offensive action $a$ and defensive card $b$.  The matrix game
+$\max_{\sigma_O}\min_{\sigma_D}\, \sigma_O^\top A\, \sigma_D$ is then solved via LP to
+obtain mixed strategies.
+
+The utility function $A_{a,b}$ is where the approximation lives.  McCulloch converts each
+chart result into a scalar by applying additive bonuses:
+
+\begin{itemize}
+  \item A first down earns a bonus proportional to the fraction of the field gained.
+  \item A touchdown earns a large positive bonus scaled by the score context.
+  \item An interception or fumble lost earns a large negative bonus.
+  \item A fourth-down conversion earns a bonus; failing on fourth down earns a penalty.
+  \item Clock and score interact only through the bonus magnitudes, which are set by hand.
+\end{itemize}
+
+The limitations of this approach are fundamental rather than incidental:
+
+\paragraph{Heuristics cannot capture non-monotone value.}
+The value of gaining 10 yards on first-and-10 at midfield in the final minute while
+trailing by 3 is qualitatively different from the value of the same play with ten minutes
+remaining.  No fixed additive bonus captures this interaction without effectively
+re-solving the game.
+
+\paragraph{Optimal fourth-down decisions require global knowledge.}
+Whether to punt, attempt a field goal, or go for it on fourth down depends on score,
+clock, and field position in ways that require comparing continuation values under each
+option.  McCulloch's agent applies fixed cutoffs; the correct decision is state-dependent
+and only determinable via backward induction.
+
+\paragraph{End-of-half clock management is inaccessible.}
+The strategic value of running out the clock, spiking the ball, or calling a timeout is
+zero under heuristics but central to real play.  Capturing it requires the value function
+to be defined over clock states.
+
+%────────────────────────────────────────────────────────────────────────────────
+\section{Formal Game Model}
+\label{sec:model}
+%────────────────────────────────────────────────────────────────────────────────
+
+\subsection{Terminal Utility}
+
+We model \emph{Football Strategy} as a finite-horizon two-player zero-sum stochastic game.
+Let $\delta \in \mathbb{Z}$ denote the score differential (Team~1 minus Team~2) at the end
+of the game.  The terminal utility is
+\[
+  U(\delta) = \operatorname{sgn}(\delta) \in \{-1, 0, +1\},
+\]
+so the objective is to maximize win probability, not expected point margin.  This is the
+correct objective for a game whose outcome is win, loss, or draw.
+
+\subsection{State Representation}
+
+A complete game state must encode every quantity that affects future optimal play.  We
+use a \emph{symmetric possession} convention: the state is always written from the
+perspective of the team currently in possession of the ball, so field position $x \in
+[1,99]$ is always measured in yards from the current offense's own goal line
+($x = 0$: own goal; $x = 100$: opponent's goal).
+
+\begin{definition}[Scrimmage state]
+A scrimmage state is a tuple
+\[
+  s = (q,\, \tau,\, x,\, d,\, y,\, \delta,\, h,\, \theta_1,\, \theta_2),
+\]
+where:
+\begin{itemize}
+  \item $q \in \{1,2,3,4\}$ is the quarter;
+  \item $\tau \in \{0,1,\ldots,60\}$ is the number of 15-second ticks remaining in the quarter;
+  \item $x \in \{1,\ldots,99\}$ is ball position (yards from current offense's own goal);
+  \item $d \in \{1,2,3,4\}$ is the current down;
+  \item $y \in \{1,\ldots,30\}$ is yards to first down (capped at 30);
+  \item $\delta \in \{-35,\ldots,35\}$ is the score differential from the current offense's
+        perspective (clipped at $\pm 35$);
+  \item $h \in \{-1,0,+1\}$ encodes which team receives the second-half kickoff ($h=0$ in
+        Q3/Q4 when this is already resolved); and
+  \item $\theta_1,\theta_2 \in \{0,1,2,3\}$ are the remaining timeouts for the current
+        offense and defense, respectively.
+\end{itemize}
+\end{definition}
+
+\noindent Stage~1 of the solver fixes $\theta_1 = \theta_2 = 0$; Stage~2 extends the
+solution to all 16 combinations $(\theta_1,\theta_2) \in \{0,1,2,3\}^2$, with the full
+game starting at $\theta_1 = \theta_2 = 3$.
+
+\noindent In addition to scrimmage states, the game includes \emph{kickoff states}
+$(q,\tau,\delta,h)$ and \emph{safety-kick states} $(q,\tau,\delta,h)$.
+
+\paragraph{Possession symmetry.}
+Because the state is always expressed from the current offense's viewpoint, a possession
+change transforms the state as
+\[
+  x \;\mapsto\; 100 - x, \qquad
+  \delta \;\mapsto\; -\delta, \qquad
+  h \;\mapsto\; -h,
+\]
+and the continuation value is negated (since the current maximizer becomes the minimizer).
+This halves the effective state space compared to a possession-explicit encoding.
+
+\subsection{Transition Kernel}
+
+The transition kernel $P(s' \mid s, a, b)$ is determined by:
+\begin{enumerate}
+  \item \textbf{Chart lookup:} the cell at row $b$ (defense card), column $a$ (offense
+        play) of the selected offense chart.
+  \item \textbf{Outcome parsing:} chart cells encode one of: a deterministic yardage gain
+        or loss (possibly out-of-bounds), an incomplete pass, a fumble, an interception with
+        return yards, a long gain (LG), a penalty, a loss-of-down, or an OR-choice between
+        two outcomes resolved by the favored team.
+  \item \textbf{Game-rule application:} yardage is added to $x$; if $x \geq 100$ a
+        touchdown results; if $x \leq 0$ a safety results; first downs reset $d$ and $y$;
+        fourth-down failures transfer possession.
+  \item \textbf{Clock advancement:} $\tau$ is decremented by the tick cost of the outcome
+        type (Table~\ref{tab:ticks}), subject to the two-minute automatic stoppage at
+        $\tau = 8$ in Q2 and Q4.
+\end{enumerate}
+
+\begin{table}[ht]
+\centering
+\caption{Time consumed per outcome category (15~sec per tick).}
+\label{tab:ticks}
+\begin{tabular}{lcc}
+\toprule
+Outcome type & Time (sec) & Ticks \\
+\midrule
+In-bounds gain of $0$--$19$ yards & 30 & 2 \\
+In-bounds gain of $\geq 20$ yards & 45 & 3 \\
+Any loss & 30 & 2 \\
+Out-of-bounds play & 15 & 1 \\
+Incomplete pass & 15 & 1 \\
+Interception & 30 & 2 \\
+Fumble & 15 & 1 \\
+Penalty & 15 & 1 \\
+Kickoff / field goal / punt & 15 & 1 \\
+Extra point (PAT) & 0 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Long Gain.}
+Chart cells marked \texttt{LG} trigger a probabilistic outcome drawn from the distribution
+in Table~\ref{tab:lg}, which was derived from the printed Long Gain table.  LG outcomes
+always consume 3 ticks.
+
+\begin{table}[ht]
+\centering
+\caption{Long Gain distribution.}
+\label{tab:lg}
+\begin{tabular}{cc}
+\toprule
+Gain (yards) & Probability \\
+\midrule
+$+30,\;+35,\;+40,\;+45,\;+50$ & $\tfrac{1}{6}$ each \\
+$+60,\;+70,\;\ldots,\;+110$ & $\tfrac{1}{36}$ each \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Field goals.}
+A field goal attempt is legal on any down when $x \geq 55$ (within 45 yards of the
+opponent's goal line).  Success probabilities are distance-based (Table~\ref{tab:fg}).
+
+\begin{table}[ht]
+\centering
+\caption{Field goal success probabilities by distance.}
+\label{tab:fg}
+\begin{tabular}{cc}
+\toprule
+Distance to goal line (yards) & $P(\text{good})$ \\
+\midrule
+$1$--$12$   & $\tfrac{32}{36}$ \\
+$13$--$22$  & $\tfrac{28}{36}$ \\
+$23$--$32$  & $\tfrac{18}{36}$ \\
+$33$--$38$  & $\tfrac{12}{36}$ \\
+$39$--$45$  & $\tfrac{2}{36}$  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Extra points.}
+After every touchdown the scoring team attempts a PAT with $P(\text{good}) = \tfrac{34}{36}$.
+PATs consume zero clock time.
+
+%────────────────────────────────────────────────────────────────────────────────
+\section{Solution Algorithm}
+\label{sec:algorithm}
+%────────────────────────────────────────────────────────────────────────────────
+
+\subsection{The Bellman--Minimax Recursion}
+
+Let $V(s)$ denote the equilibrium value of state $s$ from the perspective of the current
+offense (Team~1 when Team~1 has the ball, Team~2's negative when Team~2 has the ball).
+The terminal condition is $V(q=4,\tau=0,\cdot) = U(\delta)$.
+
+For each scrimmage state $s$, let $O(s) \subseteq \{1,\ldots,20\} \cup \{\textsc{punt},
+\textsc{fg}\}$ be the set of legal offensive actions and $D = \{A,\ldots,J\}$ the set of
+defensive cards.  Define the expected continuation value of the action pair $(a,b)$:
+\[
+  Q_s(a,b) = \sum_{s'} P(s'\mid s,a,b)\, V(s'),
+\]
+where the sum is over successor states.  The equilibrium value satisfies
+\begin{equation}
+  \label{eq:minimax}
+  V(s) = \max_{\sigma_O \in \Delta(O(s))}\; \min_{\sigma_D \in \Delta(D)}\;
+  \sum_{a \in O(s)}\sum_{b \in D} \sigma_O(a)\,\sigma_D(b)\, Q_s(a,b).
+\end{equation}
+By the minimax theorem, the max and min can be exchanged, and the common value equals
+$V(s)$.
+
+\subsection{Linear Programming Formulation}
+
+For each scrimmage state $s$, we assemble the payoff matrix
+$A^{(s)} \in \mathbb{R}^{|O(s)|\times 10}$
+with $A^{(s)}_{a,b} = Q_s(a,b)$ and solve the row player's (offense's) LP:
+\begin{align*}
+  \text{maximize} \quad & v \\
+  \text{subject to} \quad
+  & \sum_{a} p_a\, A^{(s)}_{a,b} \geq v \quad \forall b \in D, \\
+  & \sum_{a} p_a = 1, \quad p_a \geq 0 \quad \forall a \in O(s).
+\end{align*}
+The optimal value $v^* = V(s)$ and the optimal $p^*$ is the equilibrium mixed strategy
+for the offense.  An analogous LP yields the defense's equilibrium mixed strategy.  Both
+LPs are solved using the HiGHS interior-point and dual-simplex solvers via
+\texttt{scipy.optimize.linprog}.
+
+\subsection{Backward Induction and Forward Reachability}
+
+Because states at clock time $\tau$ depend only on states at $\tau' < \tau$ (the game
+moves forward in real time), solving from $\tau=1$ upward within each quarter, then from
+$Q4$ backward to $Q1$, gives a correct backward-induction order.
+
+Algorithm~\ref{alg:solve} summarizes the procedure.  The forward BFS ensures that only
+reachable states are solved, which reduces the state count substantially.
+
+\begin{algorithm}[ht]
+\caption{Full-game backward induction solver}
+\label{alg:solve}
+\begin{algorithmic}[1]
+\Require Offense chart $C$, punt chart $P$, start state $s_0$
+\State $\mathcal{S} \gets \textsc{ForwardBFS}(C, P, s_0)$ \Comment{Enumerate all reachable states}
+\For{$q \in \{4, 3, 2, 1\}$}
+  \State Apply quarter-boundary seeding (e.g.\ halftime kickoff)
+  \For{$\tau \in \{1, 2, \ldots, 60\}$}
+    \For{each reachable state $s$ at $(q, \tau)$ \textbf{in parallel}}
+      \If{$s$ is a scrimmage state}
+        \State Build $A^{(s)}$ by calling transition engine for each $(a,b) \in O(s)\times D$
+        \State $V(s) \gets$ LP value of $A^{(s)}$
+      \ElsIf{$s$ is a kickoff or safety-kick state}
+        \State $V(s) \gets$ closed-form expected value over kickoff/punt table
+      \EndIf
+    \EndFor
+  \EndFor
+\EndFor
+\Return $V$
+\end{algorithmic}
+\end{algorithm}
+
+Each tau layer is embarrassingly parallel: states at $(q, \tau)$ look up values only at
+already-solved $(q, \tau')$ with $\tau' < \tau$, so there are no write conflicts.  The
+implementation uses Python's \texttt{multiprocessing} with \texttt{fork} semantics so that
+the ${\sim}2.5$~GB value table is inherited copy-on-write by worker processes at zero
+serialization cost.
+
+\subsection{Value Storage}
+
+Storing one float per reachable state na\"{i}vely would require a hash map over ${\sim}30$
+million keys.  Instead, we use dense NumPy arrays shaped to the state-space dimensions:
+\begin{itemize}
+  \item Q3/Q4 scrimmage: shape $(2,\, 61,\, 99,\, 4,\, 30,\, 71)$, approximately
+        $823$~MB.  No $h$ dimension because $h=0$ in the second half.
+  \item Q1/Q2 scrimmage: shape $(2,\, 61,\, 99,\, 4,\, 30,\, 71,\, 2)$, approximately
+        $1.65$~GB.  The last axis is $h \in \{-1,+1\}$.
+  \item Kickoff and safety-kick arrays: shape $(2,\, 61,\, 71)$ or $(2,\, 61,\, 71,\, 2)$,
+        negligible size.
+\end{itemize}
+Total memory: approximately $2.47$~GB.  Unsolved slots are initialized to \texttt{NaN};
+any read of an unsolved slot raises a \texttt{KeyError}, detecting dependency errors
+immediately.
+
+%────────────────────────────────────────────────────────────────────────────────
+\section{Timeout Extension (Stage~2)}
+\label{sec:timeouts}
+%────────────────────────────────────────────────────────────────────────────────
+
+Each team is entitled to three timeouts per half.  Calling a timeout after a play reduces
+the clock charge according to Table~\ref{tab:to}.
+
+\begin{table}[ht]
+\centering
+\caption{Clock time counted after a timeout is called, by original play duration.}
+\label{tab:to}
+\begin{tabular}{ccc}
+\toprule
+Original play duration & Ticks without TO & Ticks after TO \\
+\midrule
+45 sec (long gain)      & 3 & 1 \\
+30 sec (normal play)    & 2 & 0 \\
+15 sec (OOB / penalty)  & 1 & 0 \\
+\end{tabular}
+\end{table}
+
+\noindent Calling a timeout is therefore strategically useful only after a 3-tick (long
+gain, $\geq 20$ yards) or 2-tick (normal in-bounds gain) play, where it saves 2 or 1 tick
+respectively.
+
+\subsection{The Post-Play Timeout Sub-Game}
+
+After each play completes with tick cost $k$, both teams have the option to call a
+timeout before the clock advances, reducing the charge to $k' < k$.  Calling a timeout
+is an \emph{open, observable action} in \emph{Football Strategy}: it is announced
+publicly, the clock stops immediately, and the other team gains nothing by also calling
+(they would merely spend their own timeout for no additional clock benefit).  The correct
+model is therefore \emph{sequential and pure-strategy}, not simultaneous.
+
+Let $k'= \textsc{TimeoutReduce}(k)$ and define the four continuation values from the
+resulting state $s'$ (looked up from the appropriate timeout-count slice):
+\begin{align*}
+  a &= V^{(\theta_1-1,\,\theta_2-1)}(s',\,k') \quad \text{(both call)},\\
+  b &= V^{(\theta_1-1,\,\theta_2)}(s',\,k')   \quad \text{(offense calls only)},\\
+  c &= V^{(\theta_1,\,\theta_2-1)}(s',\,k')   \quad \text{(defense calls only)},\\
+  d &= V^{(\theta_1,\,\theta_2)}(s',\,k)       \quad \text{(neither calls)}.
+\end{align*}
+
+The offense announces its decision first; the defense then responds optimally.  If the
+offense calls, the clock is stopped and the defense can call as well---but since the
+clock has already stopped, calling only costs the defense a timeout without further
+benefit, so the defense calls iff $a < b$ (i.e., spending its timeout lowers the
+offense's continuation value).  The offense therefore receives $\min(a,b)$ when it calls.
+If the offense does not call, the defense calls iff $c < d$, giving the offense $\min(c,d)$.
+The offense maximizes:
+\begin{equation}
+  \label{eq:to_subgame}
+  V_{\text{TO}} = \max\!\bigl(\min(a,b),\; \min(c,d)\bigr).
+\end{equation}
+This is always a pure strategy for both sides.  The value $V_{\text{TO}}$ replaces the
+plain $V^{(\theta_1,\theta_2)}(s',k)$ lookup in the outer LP.
+
+\subsection{Layered Solve Architecture}
+
+Adding timeouts to the state would multiply the state-space by $4^2 = 16$.  Instead, we
+maintain 16 separate value tables $V^{(\theta_1,\theta_2)}$, each a full copy of the
+Stage~1 array layout ($\approx 823$~MB per table, $\approx 13$~GB total).  The tables
+are solved in order of increasing $\theta_1 + \theta_2$:
+
+\[
+  (0,0) \;\to\; (1,0),\,(0,1) \;\to\; (2,0),\,(1,1),\,(0,2) \;\to\; \cdots \;\to\; (3,3).
+\]
+
+The $(0,0)$ table is identical to the Stage~1 solution and is loaded from the pre-computed
+file.  For each subsequent $(\theta_1,\theta_2)$, a full backward-induction pass is
+performed using the TO sub-game for every state, looking up predecessor tables
+$V^{(\theta_1-1,\theta_2)}$, $V^{(\theta_1,\theta_2-1)}$, and
+$V^{(\theta_1-1,\theta_2-1)}$ as needed.  Tables that are no longer needed as predecessors
+are evicted from memory; at most four tables reside in RAM simultaneously.
+
+The game-relevant output is $V^{(3,3)}$, the value table for both teams beginning the
+quarter with three timeouts.  The full Stage~2 solve requires approximately $15\times$ the
+wall-clock time of Stage~1.
+
+%────────────────────────────────────────────────────────────────────────────────
+\section{Comparison to McCulloch's Method}
+\label{sec:comparison}
+%────────────────────────────────────────────────────────────────────────────────
+
+Table~\ref{tab:compare} summarizes the principal differences between McCulloch's approach
+and ours.
+
+\begin{table}[ht]
+\centering
+\caption{McCulloch's heuristic agent vs.\ the exact backward-induction solver.}
+\label{tab:compare}
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{lll}
+\toprule
+Aspect & McCulloch (2004) & This work \\
+\midrule
+\textbf{Matrix entry value} &
+  Heuristic bonus on raw yardage &
+  Exact continuation value $Q_s(a,b)$ \\[2pt]
+\textbf{Optimality guarantee} &
+  Local Nash per play; global not guaranteed &
+  Global Nash for the full game \\[2pt]
+\textbf{Clock} &
+  Not modeled explicitly &
+  Exact 15-sec tick accounting, \\
+  & & two-minute warning, timeouts \\[2pt]
+\textbf{Fourth-down decisions} &
+  Fixed heuristic cutoffs &
+  Optimal from $V(s)$ for punt/FG/go \\[2pt]
+\textbf{Score sensitivity} &
+  Bonus scaling by score margin &
+  Terminal utility $U(\delta)\in\{-1,0,+1\}$ \\[2pt]
+\textbf{Field goal} &
+  Heuristic range threshold &
+  Exact probability by distance \\[2pt]
+\textbf{Kickoff / safety kick} &
+  Not modeled as strategic decisions &
+  Full stochastic transitions; \\
+  & & onside kick option included \\[2pt]
+\textbf{Punts} &
+  Fixed utility for receiving position &
+  Optimal punt vs.\ go-for-it trade-off \\[2pt]
+\textbf{Timeouts} &
+  Not modeled &
+  Pure-strategy sequential sub-game; \\
+  & & 16-table layered solve \\[2pt]
+\textbf{State space solved} &
+  Each play independently &
+  ${\sim}30$M $\times$ 16 TO combos (Q4) \\[2pt]
+\textbf{Tunable parameters} &
+  Several heuristic constants &
+  None \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The most consequential difference is the matrix entry.  In McCulloch's formulation,
+$A^{(s)}_{a,b}$ is an approximate scalar that proxies game value.  In ours, it is
+$Q_s(a,b) = \mathbb{E}[V(s') \mid s,a,b]$, which is the exact expected value of the
+resulting position under equilibrium play from that position onward.  Consequently, our
+equilibrium mixed strategy is a Nash equilibrium for the \emph{game of Football Strategy}
+itself, not merely for the local matrix game with surrogate payoffs.
+
+\paragraph{On the correctness of heuristic strategies.}
+It is in principle possible that McCulloch's heuristics happen to produce strategies close
+to the true equilibrium; whether this is so is an empirical question that our solver can
+now answer directly, by comparing the heuristic mixed strategies to the exact equilibrium
+strategies at each state.
+
+%────────────────────────────────────────────────────────────────────────────────
+\section{Red-Zone Play Restrictions and Chart Parsing}
+\label{sec:redzone}
+%────────────────────────────────────────────────────────────────────────────────
+
+The Ball Control Offense Plays Chart restricts legal play sets near the opponent's goal
+line.  In offense-relative coordinates:
+
+\begin{itemize}
+  \item Plays 17--20 are illegal when $x \geq 80$ (within the opponent's 20).
+  \item Plays 13--16 are illegal when $x \geq 90$ (within the opponent's 10).
+\end{itemize}
+
+The chart is parsed cell-by-cell into a typed intermediate representation before solving.
+Each cell token is classified as one of: \textsc{Yards}, \textsc{Incomplete},
+\textsc{Fumble}, \textsc{LongGain}, \textsc{Interception}($r$), \textsc{Penalty}($y$),
+\textsc{LossOfDown}($y$), or an OR-choice \textsc{Choice}$(\text{branch}_1,
+\text{branch}_2, \text{resolver})$ where \texttt{resolver} $\in \{\text{offense},
+\text{defense}\}$ indicates which team selects the better branch.  This separation between
+parsing and solving simplifies both the transition engine and the LP construction.
+
+A subtle rule applies to interceptions with large negative return yards (the intercepting
+defender runs toward their own end zone): if the resulting field position exceeds the
+physical boundary of the defender's end zone (more than 110 yards from the offense's own
+goal line in offense-relative coordinates), the play is treated as an incomplete pass
+rather than a touchback.
+
+%────────────────────────────────────────────────────────────────────────────────
+\section{Scale and Computational Results}
+\label{sec:results}
+%────────────────────────────────────────────────────────────────────────────────
+
+The fourth-quarter solve enumerates approximately $30.9$ million reachable states across 60
+clock layers via forward BFS.  Of these, approximately 615,000 are unique
+\emph{scrimmage core} states (the $(x,d,y,\delta,h)$ component), with each appearing at
+multiple clock values.  Each scrimmage state requires solving a matrix LP with at most 22
+rows (offense actions) and 10 columns (defense cards).
+
+The solve runs in approximately 8 hours on an 8-core machine using parallel LP solving
+within each clock layer.  The resulting value table is stored in approximately $823$~MB as
+a dense NumPy array.
+
+The value $V(s_0)$ at the initial kickoff state $(q=4,\tau=60,\delta=0)$ gives the exact
+win probability for the team kicking off at the start of the fourth quarter under a tied
+score.  Any deviation from the equilibrium mixed strategies by either player can only
+decrease that player's win probability.
+
+%────────────────────────────────────────────────────────────────────────────────
+\begin{thebibliography}{9}
+
+\bibitem{mcculloch}
+Sean McCulloch.
+\newblock A game-theoretic intelligent agent for the board game \emph{Football
+  Strategy}.
+\newblock \emph{Unpublished manuscript}, 2004.
+
+\bibitem{neumann}
+John von Neumann.
+\newblock Zur Theorie der Gesellschaftsspiele.
+\newblock \emph{Mathematische Annalen}, 100(1):295--320, 1928.
+
+\bibitem{shapley}
+Lloyd Shapley.
+\newblock Stochastic games.
+\newblock \emph{Proceedings of the National Academy of Sciences}, 39(10):1095--1100, 1953.
+
+\bibitem{puterman}
+Martin Puterman.
+\newblock \emph{Markov Decision Processes: Discrete Stochastic Dynamic Programming}.
+\newblock John Wiley \& Sons, 1994.
+
+\bibitem{highs}
+Julian Hall, Ivet Galabova, Leona Gottwald, and Michael Feldmeier.
+\newblock {HiGHS}: High performance software for linear optimization.
+\newblock \url{https://highs.dev}, 2023.
+
+\end{thebibliography}
+
+\end{document}
