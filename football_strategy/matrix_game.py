@@ -43,6 +43,29 @@ from football_strategy.constants import FG_ACTION, PUNT_ACTION
 # LP solvers (copied from old/solve_quarter_sym.py; no changes except imports)
 # ---------------------------------------------------------------------------
 
+def _fictitious_play(A: np.ndarray, n_iter: int = 30_000) -> Tuple[float, np.ndarray, np.ndarray]:
+    """HiGHS-independent fallback: fictitious play for zero-sum matrix games.
+
+    Converges to the Nash equilibrium; used when HiGHS returns no solution.
+    Returns (v, p, q) where p is the row player's mixed strategy, q the column
+    player's mixed strategy, and v the game value from the row player's perspective.
+    """
+    import warnings
+    m, n = A.shape
+    counts_r = np.ones(m, dtype=float)
+    counts_c = np.ones(n, dtype=float)
+    for _ in range(n_iter):
+        defense_mix = counts_c / counts_c.sum()
+        counts_r[int(np.argmax(A @ defense_mix))] += 1.0
+        offense_mix = counts_r / counts_r.sum()
+        counts_c[int(np.argmin(A.T @ offense_mix))] += 1.0
+    p = counts_r / counts_r.sum()
+    q = counts_c / counts_c.sum()
+    v = float(np.min(A.T @ p))
+    warnings.warn(f"HiGHS LP failed; fictitious-play fallback used (v≈{v:.4f})")
+    return v, p, q
+
+
 def _is_feasible_row_lp(A: np.ndarray, p: np.ndarray, v: float, tol: float = 1e-8) -> bool:
     if np.any(p < -tol):
         return False
@@ -57,7 +80,11 @@ def solve_row_strategy(A: np.ndarray, *, tol: float = 1e-8) -> Tuple[float, np.n
 
     Returns (v, p) where v is the game value and p is the mixed strategy.
     """
+    import warnings
     A = np.asarray(A, dtype=float)
+    if not np.all(np.isfinite(A)):
+        warnings.warn(f"Payoff matrix has non-finite values ({(~np.isfinite(A)).sum()} entries); replacing with 0.0")
+        A = np.where(np.isfinite(A), A, 0.0)
     m, n = A.shape
     v_lo = float(np.min(A)) - 1e-9
     v_hi = float(np.max(A)) + 1e-9
@@ -116,7 +143,9 @@ def solve_row_strategy(A: np.ndarray, *, tol: float = 1e-8) -> Tuple[float, np.n
         v = float(np.min(A.T @ p))  # guaranteed lower bound on game value
         return v, p
 
-    raise RuntimeError(f"Row LP failed after fallbacks. Last message: {last_msg}")
+    # HiGHS returned no solution at all — use fictitious play (always terminates).
+    v, p, _q = _fictitious_play(A)
+    return v, p
 
 
 def _is_feasible_col_lp(A: np.ndarray, q: np.ndarray, w: float, tol: float = 1e-8) -> bool:
@@ -133,7 +162,11 @@ def solve_col_strategy(A: np.ndarray, *, tol: float = 1e-8) -> Tuple[float, np.n
 
     Returns (w, q) where w is the game value and q is the mixed strategy.
     """
+    import warnings
     A = np.asarray(A, dtype=float)
+    if not np.all(np.isfinite(A)):
+        warnings.warn(f"Payoff matrix has non-finite values ({(~np.isfinite(A)).sum()} entries); replacing with 0.0")
+        A = np.where(np.isfinite(A), A, 0.0)
     m, n = A.shape
     w_lo = float(np.min(A)) - 1e-9
     w_hi = float(np.max(A)) + 1e-9
@@ -189,7 +222,10 @@ def solve_col_strategy(A: np.ndarray, *, tol: float = 1e-8) -> Tuple[float, np.n
         w = float(np.max(A @ q))  # guaranteed upper bound on game value
         return w, q
 
-    raise RuntimeError(f"Col LP failed after fallbacks. Last message: {last_msg}")
+    # HiGHS returned no solution at all — use fictitious play (always terminates).
+    _v, _p, q = _fictitious_play(A)
+    w = float(np.max(A @ q))
+    return w, q
 
 
 # ---------------------------------------------------------------------------
